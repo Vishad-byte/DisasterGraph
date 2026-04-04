@@ -1,0 +1,125 @@
+USE GRAPH DisasterGraph
+
+CREATE OR REPLACE QUERY findAffectedZones(STRING event_id) FOR GRAPH DisasterGraph {
+  SumAccum<FLOAT> @sev;
+
+  zones =
+    SELECT z
+    FROM DisasterEvent:d -(affects:e)-> Zone:z
+    WHERE to_string(getvid(d)) == event_id AND z.is_affected == true
+    ACCUM z.@sev += e.severity
+    ORDER BY z.@sev DESC;
+
+  PRINT zones;
+}
+
+
+CREATE OR REPLACE QUERY rankVictimsByUrgency(STRING zone_id) FOR GRAPH DisasterGraph {
+  SumAccum<FLOAT> @urgency_score;
+
+  victims =
+    SELECT p
+    FROM Person:p -(located_in)-> zone_id:z
+    ACCUM p.@urgency_score += (p.vulnerability_score * 0.6) + ((p.mobility / 2.0) * 0.4)
+    ORDER BY p.@urgency_score DESC
+    LIMIT 20;
+
+  PRINT victims;
+}
+
+
+CREATE OR REPLACE QUERY findAvailableResources(STRING zone_id, STRING resource_type) FOR GRAPH DisasterGraph {
+  SumAccum<INT> @available_slots;
+
+  resources =
+    SELECT r
+    FROM Resource:r -(serves)-> zone_id:z
+    WHERE r.is_available == true AND r.resource_type == resource_type
+    ACCUM r.@available_slots += (r.capacity - r.current_load)
+    ORDER BY r.@available_slots DESC;
+
+  PRINT resources;
+}
+
+
+CREATE OR REPLACE QUERY shortestPassableRoute(STRING from_zone, STRING to_zone) FOR GRAPH DisasterGraph {
+  source =
+    SELECT s
+    FROM Zone:s
+    WHERE to_string(getvid(s)) == from_zone;
+
+  result =
+    SELECT z
+    FROM source:s -(connects:e)-> Zone:z
+    WHERE to_string(getvid(z)) == to_zone
+    AND e.is_blocked == false
+    LIMIT 1;
+
+  fallback =
+    SELECT z
+    FROM source:s -(connects:e)-> Zone:z
+    WHERE e.is_blocked == false
+    LIMIT 1;
+
+  PRINT result;
+  PRINT fallback;
+}
+
+
+CREATE OR REPLACE QUERY updateResourceState(
+  STRING res_id,
+  INT new_load,
+  STRING assigned_person,
+  FLOAT eta_min = 0
+) FOR GRAPH DisasterGraph {
+  resources =
+    SELECT r
+    FROM Resource:r
+    WHERE to_string(getvid(r)) == res_id
+    POST-ACCUM
+      r.current_load = new_load,
+      r.is_available = (new_load < r.capacity);
+
+  assigned =
+    SELECT p
+    FROM Person:p
+    WHERE to_string(getvid(p)) == assigned_person;
+
+  PRINT resources;
+  PRINT assigned;
+}
+
+
+CREATE OR REPLACE QUERY propagateSeverity(STRING event_id, INT hops) FOR GRAPH DisasterGraph {
+  SumAccum<FLOAT> @edge_sev;
+
+  frontier =
+    SELECT z
+    FROM DisasterEvent:d -(affects:e)-> Zone:z
+    WHERE to_string(getvid(d)) == event_id
+    ACCUM z.@edge_sev += e.severity
+    POST-ACCUM
+      z.disaster_severity = z.@edge_sev,
+      z.is_affected = true;
+
+  IF hops > 0 THEN
+    next_hop =
+      SELECT n
+      FROM frontier:f -(connects:c)-> Zone:n
+      WHERE c.is_blocked == false
+      POST-ACCUM
+        n.disaster_severity = n.disaster_severity + 0.2,
+        n.is_affected = true;
+    PRINT next_hop;
+  END;
+
+  PRINT frontier;
+}
+
+
+INSTALL QUERY findAffectedZones
+INSTALL QUERY rankVictimsByUrgency
+INSTALL QUERY findAvailableResources
+INSTALL QUERY shortestPassableRoute
+INSTALL QUERY updateResourceState
+INSTALL QUERY propagateSeverity
