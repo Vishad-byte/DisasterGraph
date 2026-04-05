@@ -72,14 +72,14 @@ class DisasterGraphAgent:
         return mapping
 
     def _extract_event_ids(self) -> list[str]:
-        rows = self.conn.getVertices("DisasterEvent", select="event_id,status", limit=500)
+        rows = self.conn.getVertices("DisasterEvent", select="status", limit=500)
         event_ids: list[str] = []
         for row in rows:
             attrs = row.get("attributes", {}) if isinstance(row, dict) else {}
             status = attrs.get("status", "")
             if status != "active":
                 continue
-            event_id = (row.get("v_id") if isinstance(row, dict) else None) or attrs.get("event_id")
+            event_id = row.get("v_id") if isinstance(row, dict) else None
             if event_id:
                 event_ids.append(str(event_id))
         return event_ids
@@ -207,8 +207,12 @@ class DisasterGraphAgent:
                         zone_by_dist = (dist, zid)
                 if zone_by_dist:
                     return zone_by_dist[1]
-            except Exception:
-                pass
+            except Exception as exc:
+                LOGGER.debug(
+                    "Failed to infer resource zone from coordinates for %s: %s",
+                    res_id or "unknown-resource",
+                    exc,
+                )
 
         return fallback_zone
 

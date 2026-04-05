@@ -83,7 +83,6 @@ def ingest_firms_from_csv(conn: Any, csv_text: str, source: str = "FIRMS") -> di
             "DisasterEvent",
             event_id,
             {
-                "event_key": event_id,
                 "event_type": "fire",
                 "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 "severity": severity,

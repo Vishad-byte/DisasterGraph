@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import importlib
 import os
+import json
+import base64
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 from dataclasses import dataclass
 from typing import Any
 
@@ -96,9 +100,38 @@ def get_tg_connection(settings: Settings | None = None, include_graph: bool = Tr
     conn = TigerGraphConnection(**kwargs)
 
     if cfg.tigergraph_secret:
-        try:
-            conn.getToken(secret=cfg.tigergraph_secret)
-        except Exception:
-            pass
+        token = _fetch_tg_token(
+            host=host,
+            username=cfg.tigergraph_username,
+            password=cfg.tigergraph_password,
+            secret=cfg.tigergraph_secret,
+        )
+        conn.apiToken = token
 
     return conn
+
+
+def _fetch_tg_token(host: str, username: str, password: str, secret: str) -> str:
+    auth = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("utf-8")
+    payload = json.dumps({"secret": secret}).encode("utf-8")
+    req = Request(
+        url=f"{host}:443/gsql/v1/tokens",
+        method="POST",
+        data=payload,
+        headers={
+            "Authorization": f"Basic {auth}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    try:
+        with urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Unable to fetch TigerGraph token: HTTP {exc.code}: {body}") from exc
+
+    token = data.get("token") if isinstance(data, dict) else None
+    if not token:
+        raise RuntimeError(f"Unable to fetch TigerGraph token: unexpected response {data}")
+    return str(token)

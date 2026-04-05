@@ -7,12 +7,12 @@ from disastergraph.graph.gsql_exec import run_gsql_statement
 
 SCHEMA_STATEMENTS = [
     "USE GLOBAL",
-    "CREATE VERTEX Person (PRIMARY_ID id STRING, person_key STRING, name STRING, location_lat FLOAT, location_lng FLOAT, vulnerability_score FLOAT, medical_needs STRING, mobility INT)",
-    "CREATE VERTEX Zone (PRIMARY_ID zone_id STRING, zone_key STRING, name STRING, centroid_lat FLOAT, centroid_lng FLOAT, population_count INT, disaster_severity FLOAT, is_affected BOOL)",
-    "CREATE VERTEX Resource (PRIMARY_ID res_id STRING, resource_key STRING, resource_type STRING, capacity INT, current_load INT, location_lat FLOAT, location_lng FLOAT, is_available BOOL)",
-    "CREATE VERTEX Route (PRIMARY_ID route_id STRING, route_key STRING, start_zone STRING, end_zone STRING, distance_km FLOAT, estimated_time_min FLOAT, is_blocked BOOL, blockage_reason STRING)",
-    "CREATE VERTEX DisasterEvent (PRIMARY_ID event_id STRING, event_key STRING, event_type STRING, timestamp DATETIME, severity FLOAT, satellite_source STRING, status STRING)",
-    "CREATE VERTEX Officer (PRIMARY_ID officer_id STRING, officer_key STRING, name STRING, telegram_chat_id STRING, zone STRING)",
+    "CREATE VERTEX Person (PRIMARY_ID id STRING, name STRING, location_lat FLOAT, location_lng FLOAT, vulnerability_score FLOAT, medical_needs STRING, mobility INT)",
+    "CREATE VERTEX Zone (PRIMARY_ID zone_id STRING, name STRING, centroid_lat FLOAT, centroid_lng FLOAT, population_count INT, disaster_severity FLOAT, is_affected BOOL)",
+    "CREATE VERTEX Resource (PRIMARY_ID res_id STRING, resource_type STRING, capacity INT, current_load INT, location_lat FLOAT, location_lng FLOAT, is_available BOOL)",
+    "CREATE VERTEX Route (PRIMARY_ID route_id STRING, start_zone STRING, end_zone STRING, distance_km FLOAT, estimated_time_min FLOAT, is_blocked BOOL, blockage_reason STRING)",
+    "CREATE VERTEX DisasterEvent (PRIMARY_ID event_id STRING, event_type STRING, timestamp DATETIME, severity FLOAT, satellite_source STRING, status STRING)",
+    "CREATE VERTEX Officer (PRIMARY_ID officer_id STRING, name STRING, telegram_chat_id STRING, zone STRING)",
     "CREATE DIRECTED EDGE located_in (FROM Person, TO Zone)",
     "CREATE DIRECTED EDGE affects (FROM DisasterEvent, TO Zone, severity FLOAT)",
     "CREATE DIRECTED EDGE serves (FROM Resource, TO Zone, coverage_radius_km FLOAT)",
@@ -26,12 +26,6 @@ SCHEMA_STATEMENTS = [
 
 ALTER_STATEMENTS = [
     "USE GLOBAL",
-    "ALTER VERTEX Person ADD ATTRIBUTE (person_key STRING)",
-    "ALTER VERTEX Zone ADD ATTRIBUTE (zone_key STRING)",
-    "ALTER VERTEX Resource ADD ATTRIBUTE (resource_key STRING)",
-    "ALTER VERTEX Route ADD ATTRIBUTE (route_key STRING)",
-    "ALTER VERTEX DisasterEvent ADD ATTRIBUTE (event_key STRING)",
-    "ALTER VERTEX Officer ADD ATTRIBUTE (officer_key STRING)",
 ]
 
 

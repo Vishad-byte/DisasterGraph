@@ -35,7 +35,6 @@ def load_delhi_flood_2023(conn: Any, csv_path: str | Path) -> dict[str, int]:
                 "DisasterEvent",
                 event_id,
                 {
-                    "event_key": event_id,
                     "event_type": "flood",
                     "timestamp": date_text,
                     "severity": severity,

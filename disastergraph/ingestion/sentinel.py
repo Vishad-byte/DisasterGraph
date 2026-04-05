@@ -59,7 +59,6 @@ def ingest_sentinel_cached(conn: Any, csv_path: str | Path) -> dict[str, int]:
             "DisasterEvent",
             event_id,
             {
-                "event_key": event_id,
                 "event_type": "pollution",
                 "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 "severity": severity,

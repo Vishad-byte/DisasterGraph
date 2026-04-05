@@ -66,5 +66,5 @@ def pretty_json_or_text(text: str) -> str:
     try:
         obj = json.loads(text)
         return json.dumps(obj, indent=2)
-    except Exception:
+    except json.JSONDecodeError:
         return text

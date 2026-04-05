@@ -38,7 +38,6 @@ class DisasterGraphTelegramBot:
             "Officer",
             officer_id,
             {
-                "officer_key": officer_id,
                 "name": officer_name,
                 "telegram_chat_id": chat_id,
                 "zone": zone_id,
@@ -100,6 +99,52 @@ class DisasterGraphTelegramBot:
                             out.append(attrs)
         return out
 
+    def _available_resource_count_direct(self, zone_id: str, resource_type: str) -> int:
+        count = 0
+        resources = self.conn.getVertices("Resource", limit=10000)
+        for resource in resources:
+            if not isinstance(resource, dict):
+                continue
+            attrs = resource.get("attributes", {})
+            if not isinstance(attrs, dict):
+                continue
+
+            if str(attrs.get("resource_type", "")) != resource_type:
+                continue
+            if not bool(attrs.get("is_available", False)):
+                continue
+
+            res_id = str(resource.get("v_id", ""))
+            if not res_id:
+                continue
+
+            serves = self.conn.getEdges("Resource", res_id, "serves")
+            if any(isinstance(edge, dict) and str(edge.get("to_id", "")) == zone_id for edge in serves):
+                count += 1
+        return count
+
+    def _available_resource_count(self, zone_id: str, resource_type: str) -> int:
+        query_rows = self._extract_rows(
+            self.conn.runInstalledQuery(
+                "findAvailableResources",
+                {
+                    "zone_id": zone_id,
+                    "resource_type": resource_type,
+                },
+            )
+        )
+        if query_rows:
+            return len(query_rows)
+
+        direct_count = self._available_resource_count_direct(zone_id, resource_type)
+        LOGGER.info(
+            "Fallback direct resource count used for zone=%s type=%s count=%s",
+            zone_id,
+            resource_type,
+            direct_count,
+        )
+        return direct_count
+
     async def status(self, update: Any, context: Any) -> None:
         args = context.args or []
         if not args:
@@ -120,41 +165,17 @@ class DisasterGraphTelegramBot:
         sev = zone.get("disaster_severity", 0)
         affected = zone.get("is_affected", False)
 
-        ambulances = self._extract_rows(
-            self.conn.runInstalledQuery(
-                "findAvailableResources",
-                {
-                    "zone_id": zone_id,
-                    "resource_type": "ambulance",
-                },
-            )
-        )
-        hospitals = self._extract_rows(
-            self.conn.runInstalledQuery(
-                "findAvailableResources",
-                {
-                    "zone_id": zone_id,
-                    "resource_type": "hospital",
-                },
-            )
-        )
-        shelters = self._extract_rows(
-            self.conn.runInstalledQuery(
-                "findAvailableResources",
-                {
-                    "zone_id": zone_id,
-                    "resource_type": "shelter",
-                },
-            )
-        )
+        ambulances = self._available_resource_count(zone_id, "ambulance")
+        hospitals = self._available_resource_count(zone_id, "hospital")
+        shelters = self._available_resource_count(zone_id, "shelter")
 
         text = (
             f"Zone: {zone.get('name', zone_id)} ({zone_id})\n"
             f"Affected: {affected}\n"
             f"Severity: {sev}\n"
-            f"Available ambulances: {len(ambulances)}\n"
-            f"Available hospitals: {len(hospitals)}\n"
-            f"Available shelters: {len(shelters)}"
+            f"Available ambulances: {ambulances}\n"
+            f"Available hospitals: {hospitals}\n"
+            f"Available shelters: {shelters}"
         )
         await update.message.reply_text(text)
 

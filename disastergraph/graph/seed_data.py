@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import importlib
+import logging
 from dataclasses import asdict
 from datetime import datetime, timezone
 from json import loads
@@ -12,6 +13,9 @@ from disastergraph.config import get_settings, get_tg_connection
 from disastergraph.graph.utils import ZoneInfo, haversine_km, list_zones, nearest_zone
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 def _random_name(prefix: str, index: int) -> str:
     return f"{prefix}-{index:03d}"
 
@@ -19,7 +23,6 @@ def _random_name(prefix: str, index: int) -> str:
 def _to_attr_dict(zone: ZoneInfo) -> dict[str, Any]:
     data = asdict(zone)
     return {
-        "zone_key": data["zone_id"],
         "name": data["name"],
         "centroid_lat": data["centroid_lat"],
         "centroid_lng": data["centroid_lng"],
@@ -140,7 +143,6 @@ def seed_people(conn: Any, zones: list[ZoneInfo], count: int = 200) -> int:
             "Person",
             person_id,
             {
-                "person_key": person_id,
                 "name": f"Resident {i+1}",
                 "location_lat": zone.centroid_lat + lat_jitter,
                 "location_lng": zone.centroid_lng + lng_jitter,
@@ -184,7 +186,6 @@ def seed_resources(conn: Any, zones: list[ZoneInfo]) -> int:
                 "Resource",
                 res_id,
                 {
-                    "resource_key": res_id,
                     "resource_type": resource_type,
                     "capacity": capacity,
                     "current_load": current_load,
@@ -238,7 +239,6 @@ def seed_events(conn: Any, zones: list[ZoneInfo]) -> int:
             "DisasterEvent",
             event_id,
             {
-                "event_key": event_id,
                 "event_type": random.choice(["flood", "fire", "pollution"]),
                 "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 "severity": severity,
@@ -302,7 +302,6 @@ def seed_osm_routes(conn: Any, zones: list[ZoneInfo], max_edges: int = 1000) -> 
             "Route",
             route_id,
             {
-                "route_key": route_id,
                 "start_zone": src_zone.zone_id,
                 "end_zone": dst_zone.zone_id,
                 "distance_km": distance_km,
@@ -362,7 +361,6 @@ def seed_fallback_routes(conn: Any, zones: list[ZoneInfo], per_zone_links: int =
                 "Route",
                 route_id,
                 {
-                    "route_key": route_id,
                     "start_zone": zone.zone_id,
                     "end_zone": nb.zone_id,
                     "distance_km": distance_km,
@@ -403,8 +401,6 @@ def run_seed(conn: Any | None = None) -> dict[str, int]:
         upsert_zones(conn, zones)
     else:
         zones = zones[:50]
-        for z in zones:
-            conn.upsertVertex("Zone", z.zone_id, {"zone_key": z.zone_id})
 
     counts = {
         "zones": len(zones),
@@ -416,7 +412,8 @@ def run_seed(conn: Any | None = None) -> dict[str, int]:
 
     try:
         counts["route_writes"] = seed_osm_routes(conn, zones)
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("OSM route seeding failed, using fallback routes: %s", exc)
         counts["route_writes"] = seed_fallback_routes(conn, zones)
 
     return counts
