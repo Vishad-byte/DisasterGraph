@@ -35,10 +35,13 @@ class DisasterGraphAgent:
         self.settings = get_settings()
         self.conn = get_tg_connection(self.settings)
         self.llm = LLMClient(self.settings)
-
-        telegram_mod = importlib.import_module("telegram")
-
-        self.bot = telegram_mod.Bot(token=self.settings.telegram_token)
+        self.bot: Any | None = None
+        try:
+            telegram_mod = importlib.import_module("telegram")
+            if self.settings.telegram_token:
+                self.bot = telegram_mod.Bot(token=self.settings.telegram_token)
+        except Exception as exc:
+            LOGGER.warning("Telegram bot initialization skipped: %s", exc)
         self.officer_chat_ids = self._load_officer_chat_ids()
 
         if self.settings.llm_provider == "claude" and not self.settings.claude_api_key:
@@ -312,6 +315,10 @@ class DisasterGraphAgent:
         )
 
     def send_alert(self, assignment: Assignment) -> None:
+        if self.bot is None:
+            LOGGER.warning("Telegram bot not configured; skipping alert delivery.")
+            return
+
         self.officer_chat_ids = self._load_officer_chat_ids()
         chat_id = self.officer_chat_ids.get(assignment.destination_zone)
         if not chat_id:
@@ -325,7 +332,10 @@ class DisasterGraphAgent:
             f"Action: {assignment.action}\n"
             f"ETA: {assignment.eta} min"
         )
-        self._run_async(self.bot.send_message(chat_id=chat_id, text=message))
+        try:
+            self._run_async(self.bot.send_message(chat_id=chat_id, text=message))
+        except Exception as exc:
+            LOGGER.warning("Failed to send Telegram alert: %s", exc)
 
     def _run_async(self, coroutine: Any) -> Any:
         try:

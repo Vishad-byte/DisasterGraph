@@ -47,14 +47,42 @@ def _http_get_json(url: str) -> dict[str, Any]:
         return payload
 
 
-def _http_post_json(url: str, timeout_seconds: float = 120.0) -> dict[str, Any]:
-    with httpx.Client(timeout=timeout_seconds) as client:
-        resp = client.post(url)
-        resp.raise_for_status()
-        payload = resp.json()
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=502, detail=f"Invalid response from upstream POST {url}")
-        return payload
+def _http_post_json(
+    url: str,
+    timeout_seconds: float = 120.0,
+    retries: int = 2,
+    retry_delay_seconds: float = 1.0,
+) -> dict[str, Any]:
+    attempts = max(1, retries + 1)
+    last_error: Exception | None = None
+
+    for attempt in range(attempts):
+        try:
+            with httpx.Client(timeout=timeout_seconds) as client:
+                resp = client.post(url)
+                resp.raise_for_status()
+                payload = resp.json()
+                if not isinstance(payload, dict):
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Invalid response from upstream POST {url}",
+                    )
+                return payload
+        except httpx.HTTPStatusError as exc:
+            last_error = exc
+            status_code = exc.response.status_code
+            if status_code not in {502, 503, 504} or attempt >= attempts - 1:
+                raise
+            time.sleep(retry_delay_seconds)
+        except httpx.HTTPError as exc:
+            last_error = exc
+            if attempt >= attempts - 1:
+                raise
+            time.sleep(retry_delay_seconds)
+
+    if last_error is not None:
+        raise last_error
+    raise HTTPException(status_code=502, detail=f"Upstream POST failed for {url}")
 
 
 def _conn() -> Any:
@@ -690,7 +718,7 @@ def map_live() -> str:
   <div class="layout">
     <aside class="panel">
       <h1 class="title">DisasterGraph Live Risk Map</h1>
-      <p class="subtitle">Auto-refresh every 10s. Zones are colored by severity and affected status.</p>
+      <p class="subtitle">Auto-refresh every 60s. Zones are colored by severity and affected status.</p>
       <div class="stat"><div class="k">Total Zones</div><div id="zoneCount" class="v">-</div></div>
       <div class="stat"><div class="k">Affected Zones</div><div id="affectedCount" class="v">-</div></div>
       <div class="stat"><div class="k">Active Events</div><div id="eventCount" class="v">-</div></div>
@@ -799,7 +827,7 @@ def map_live() -> str:
     }
 
     refreshMap();
-    setInterval(refreshMap, 10000);
+    setInterval(refreshMap, 60000);
   </script>
 </body>
 </html>

@@ -106,7 +106,7 @@ interface ActionDefinition {
 }
 
 const DEFAULT_CENTER: LatLngTuple = [28.6139, 77.209]
-const POLL_INTERVAL_MS = 10_000
+const POLL_INTERVAL_MS = 60_000
 
 const ACTIONS: ActionDefinition[] = [
   {
