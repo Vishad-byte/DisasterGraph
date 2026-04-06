@@ -60,7 +60,14 @@ class RealTigerGraphEndToEndTest(unittest.TestCase):
         self.assertTrue(settings.tigergraph_username, "Missing TG_USERNAME")
         self.assertTrue(settings.tigergraph_password, "Missing TG_PASSWORD")
 
-        conn = get_tg_connection(settings)
+        try:
+            conn = get_tg_connection(settings)
+        except RuntimeError as exc:
+            message = str(exc)
+            if "Failed to start workspace" in message or "Auto start is not enabled" in message:
+                self.skipTest("TigerGraph workspace is not running; skipping real E2E test")
+            raise
+
         zones = list_zones(conn)
         self.assertGreaterEqual(len(zones), 1, "No zones found in graph")
 

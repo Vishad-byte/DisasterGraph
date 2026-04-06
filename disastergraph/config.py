@@ -61,6 +61,9 @@ class Settings:
         "DELHI_FLOOD_CACHE_PATH", "data/cache/delhi_flood_2023.csv"
     )
     census_wards_geojson: str = os.getenv("CENSUS_WARDS_GEOJSON", "")
+    ingestion_service_url: str = os.getenv(
+        "INGESTION_SERVICE_URL", "http://127.0.0.1:8001"
+    )
     agent_loop_seconds: int = int(os.getenv("AGENT_LOOP_SECONDS", "300"))
     agent_verbose: bool = os.getenv("AGENT_VERBOSE", "true").strip().lower() in {
         "1",

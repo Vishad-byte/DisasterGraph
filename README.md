@@ -94,6 +94,34 @@ python -m disastergraph.bot.bot
 python -m disastergraph.agent.disaster_agent
 ```
 
+### Frontend Command Center (React, served by FastAPI)
+
+Build once from project root:
+
+```bash
+cd frontend
+npm install
+npm run build
+```
+
+Then start dashboard API and open:
+
+- `http://localhost:8002/ui`
+
+What the command center includes:
+
+- ingestion controls (`run_all`, FIRMS, Sentinel, OSM, scheduler trigger)
+- map with affected zone severity and active event pulses
+- active event feed
+- assignment feed
+- one-click `Run Agent Once` action
+
+Optional environment variable for dashboard -> ingestion proxy target:
+
+```bash
+INGESTION_SERVICE_URL=http://127.0.0.1:8001
+```
+
 ## API Endpoints
 
 ### Ingestion
@@ -110,6 +138,15 @@ python -m disastergraph.agent.disaster_agent
 - `GET /graph/snapshot`
 - `GET /events/active`
 - `GET /assignments/live`
+- `GET /ui`
+- `GET /ui-api/overview`
+- `GET /ui-api/health`
+- `POST /ui-api/ingest/firms`
+- `POST /ui-api/ingest/sentinel`
+- `POST /ui-api/ingest/osm_roads`
+- `POST /ui-api/ingest/run_all`
+- `POST /ui-api/ingest/scheduler/trigger`
+- `POST /ui-api/agent/run_once`
 - `GET /health`
 
 ## Telegram Commands
