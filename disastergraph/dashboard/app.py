@@ -18,8 +18,8 @@ from disastergraph.agent.runner import run_detection_cycle_once
 app = FastAPI(title="DisasterGraph Dashboard API", version="0.1.0")
 settings = get_settings()
 LOGGER = logging.getLogger(__name__)
-_OVERVIEW_TTL_SECONDS = 8.0
-_ROUTES_TTL_SECONDS = 20.0
+_OVERVIEW_TTL_SECONDS = 300.0
+_ROUTES_TTL_SECONDS = 900.0
 _overview_cache_lock = threading.Lock()
 _overview_cache_payload: dict[str, Any] | None = None
 _overview_cache_ts = 0.0
@@ -277,12 +277,13 @@ def _overview_payload_cached(conn: Any) -> dict[str, Any]:
             and now - _overview_cache_ts <= _OVERVIEW_TTL_SECONDS
         ):
             return _overview_cache_payload
+        if _overview_cache_payload is not None:
+            return _overview_cache_payload
 
-    payload = _overview_payload(conn, include_assignments=False)
-    with _overview_cache_lock:
+        payload = _overview_payload(conn, include_assignments=False)
         _overview_cache_payload = payload
         _overview_cache_ts = time.monotonic()
-    return payload
+        return payload
 
 
 def _route_segments_cached(conn: Any) -> list[dict[str, Any]]:
@@ -291,12 +292,13 @@ def _route_segments_cached(conn: Any) -> list[dict[str, Any]]:
     with _routes_cache_lock:
         if _routes_cache_payload is not None and now - _routes_cache_ts <= _ROUTES_TTL_SECONDS:
             return _routes_cache_payload
+        if _routes_cache_payload is not None:
+            return _routes_cache_payload
 
-    payload = _route_segments(conn)
-    with _routes_cache_lock:
+        payload = _route_segments(conn)
         _routes_cache_payload = payload
         _routes_cache_ts = time.monotonic()
-    return payload
+        return payload
 
 
 frontend_dist = _frontend_dist_dir()

@@ -269,7 +269,9 @@ export default function App() {
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string>('never')
   const [logEntries, setLogEntries] = useState<ActionLogEntry[]>([])
   const [bootstrapping, setBootstrapping] = useState<boolean>(true)
+  const overviewLoadInFlight = useRef(false)
   const assignmentsLoadInFlight = useRef(false)
+  const routesLoadInFlight = useRef(false)
 
   const pushLog = useCallback((kind: LogKind, title: string, detail: string) => {
     const now = new Date()
@@ -284,6 +286,10 @@ export default function App() {
   }, [])
 
   const loadOverview = useCallback(async (quiet: boolean) => {
+    if (overviewLoadInFlight.current) {
+      return
+    }
+    overviewLoadInFlight.current = true
     try {
       const payload = await fetchJson<OverviewPayload>('/ui-api/overview', undefined, 90_000)
       setOverview(payload)
@@ -295,6 +301,8 @@ export default function App() {
       if (!quiet) {
         setError(err instanceof Error ? err.message : String(err))
       }
+    } finally {
+      overviewLoadInFlight.current = false
     }
   }, [])
 
@@ -323,6 +331,10 @@ export default function App() {
   }, [])
 
   const loadRoutes = useCallback(async (quiet: boolean) => {
+    if (routesLoadInFlight.current) {
+      return
+    }
+    routesLoadInFlight.current = true
     try {
       const payload = await fetchJson<{ routes: RouteSegment[] }>('/ui-api/routes', undefined, 90_000)
       setRoutes(Array.isArray(payload.routes) ? payload.routes : [])
@@ -333,6 +345,8 @@ export default function App() {
       if (!quiet) {
         setError(err instanceof Error ? err.message : String(err))
       }
+    } finally {
+      routesLoadInFlight.current = false
     }
   }, [])
 
