@@ -5,7 +5,7 @@ from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, HTTPException
 
-from disastergraph.config import get_settings, get_tg_connection
+from disastergraph.config import get_neo4j_connection, get_settings
 from disastergraph.ingestion.firms import fetch_firms_csv, ingest_firms_from_csv
 from disastergraph.ingestion.osm_loader import ingest_osm_roads
 from disastergraph.ingestion.sentinel import ingest_sentinel_cached
@@ -17,7 +17,7 @@ scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
 
 
 def _conn():
-    return get_tg_connection(settings)
+    return get_neo4j_connection(settings)
 
 
 def poll_firms() -> dict[str, int]:

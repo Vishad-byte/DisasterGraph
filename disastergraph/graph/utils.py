@@ -35,9 +35,13 @@ def list_zones(conn: Any) -> list[ZoneInfo]:
     zones: list[ZoneInfo] = []
     for row in rows:
         attrs = row.get("attributes", {}) if isinstance(row, dict) else {}
+        if not attrs and isinstance(row, dict):
+            attrs = row
+
         zone_id = (
-            (row.get("v_id") if isinstance(row, dict) else None)
-            or attrs.get("zone_id")
+            attrs.get("zone_id")
+            or (row.get("v_id") if isinstance(row, dict) else None)
+            or attrs.get("id")
             or ""
         )
         if not zone_id:
@@ -59,7 +63,7 @@ def list_zones(conn: Any) -> list[ZoneInfo]:
 
 def nearest_zone(lat: float, lng: float, zones: list[ZoneInfo]) -> ZoneInfo:
     if not zones:
-        raise ValueError("No zones available in TigerGraph.")
+        raise ValueError("No zones available in DisasterGraph.")
 
     return min(
         zones,

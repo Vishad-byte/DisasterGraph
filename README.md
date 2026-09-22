@@ -1,14 +1,13 @@
 # DisasterGraph
 
-Real-time disaster emergency response orchestration using TigerGraph, FastAPI, Claude, and Telegram.
+Real-time disaster emergency response orchestration using Neo4j (AuraDB Free / Cypher), FastAPI, Claude / OpenRouter, and Telegram.
 
 ## Stack
 
 - Python 3.11+
-- TigerGraph Savanna + pyTigerGraph
-- FastAPI + APScheduler
-- Anthropic Claude API
-- OpenRouter (default) or Anthropic Claude API
+- Neo4j AuraDB Free + official `neo4j` Python driver
+- FastAPI + Uvicorn + APScheduler
+- OpenRouter (Claude 3.5 Sonnet) or Anthropic Claude API
 - python-telegram-bot
 - NASA FIRMS + Sentinel-5P (cached for demo)
 - OSM via osmnx
@@ -20,6 +19,7 @@ disastergraph/
   agent/
     disaster_agent.py
     prompts.py
+    runner.py
   bot/
     bot.py
   dashboard/
@@ -27,7 +27,6 @@ disastergraph/
   graph/
     bootstrap.py
     demo_data.py
-    queries.gsql
     queries.py
     schema.py
     seed_data.py
@@ -40,136 +39,97 @@ disastergraph/
     sentinel.py
 requirements.txt
 .env.example
+.env
 ```
 
-## Setup
+## Setup & Configuration
 
-1. Create virtual environment and install dependencies:
+1. Install dependencies:
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-2. Copy `.env.example` to `.env` and fill credentials.
+2. Configure environment in `.env`:
 
-   LLM options:
+```env
+NEO4J_URI=neo4j+s://<your-instance-id>.databases.neo4j.io
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=<your-generated-password>
 
-   - Default: OpenRouter (`LLM_PROVIDER=openrouter` + `OPENROUTER_API_KEY`)
-   - Optional: direct Anthropic (`LLM_PROVIDER=claude` + `CLAUDE_API_KEY`)
+LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=your-openrouter-key
+LLM_MODEL=anthropic/claude-3.5-sonnet
 
-3. Prepare demo cache files (optional but recommended for hackathon demo):
-   - `data/cache/firms.csv`
-   - `data/cache/sentinel_no2.csv`
-   - `data/cache/delhi_flood_2023.csv`
-   - `data/cache/delhi_wards.geojson` (optional)
+TELEGRAM_TOKEN=your-telegram-bot-token
+INGESTION_SERVICE_URL=http://127.0.0.1:8001
+```
 
-## Bootstrap Graph (Phase 1 + 2 + seed)
+> **Note**: AuraDB Free automatically pauses after ~3 days of inactivity. If connection fails, resume it from [console.neo4j.io](https://console.neo4j.io).
+
+## Bootstrap Graph (Schema + Constraints + Seed Data)
+
+To create schema constraints and seed 50 zones, 200 persons, resources, and routes:
 
 ```bash
 python -m disastergraph.graph.bootstrap
 ```
 
-One-shot demo bootstrap + cached ingestion:
+Or run one-shot demo bootstrap with cached satellite data:
 
 ```bash
 python -m disastergraph.demo_runner
 ```
 
-What this does:
+## Running the Services
 
-- Creates graph schema in TigerGraph
-- Installs all GSQL queries
-- Seeds zones/persons/resources/routes/events
+Open separate terminals in the project root:
 
-## Run Services
-
-In separate terminals:
-
+### Terminal 1: Ingestion Service (Port 8001)
 ```bash
 uvicorn disastergraph.ingestion.main:app --host 0.0.0.0 --port 8001 --reload
+```
+
+### Terminal 2: Dashboard Command Center API (Port 8002)
+```bash
 uvicorn disastergraph.dashboard.app:app --host 0.0.0.0 --port 8002 --reload
-python -m disastergraph.bot.bot
+```
+
+### Terminal 3: LLM Dispatch Agent Loop
+```bash
 python -m disastergraph.agent.disaster_agent
 ```
 
-### Frontend Command Center (React, served by FastAPI)
+### Terminal 4: Telegram Alert Bot (Optional)
+```bash
+python -m disastergraph.bot.bot
+```
 
-Build once from project root:
+---
 
+## Frontend Web Command Center
+
+Open your browser to:
+- **`http://localhost:8002/ui`**
+
+To rebuild frontend assets:
 ```bash
 cd frontend
 npm install
 npm run build
 ```
 
-Then start dashboard API and open:
+---
 
-- `http://localhost:8002/ui`
+## Verification & Testing
 
-What the command center includes:
-
-- ingestion controls (`run_all`, FIRMS, Sentinel, OSM, scheduler trigger)
-- map with affected zone severity and active event pulses
-- active event feed
-- assignment feed
-- one-click `Run Agent Once` action
-
-Optional environment variable for dashboard -> ingestion proxy target:
+Run all unit and end-to-end tests:
 
 ```bash
-INGESTION_SERVICE_URL=http://127.0.0.1:8001
+# Run 3 core migration verification scenarios
+python e2e_verification.py
+
+# Run all test suites
+python -m unittest test_disastergraph_smoke.py
+python -m unittest discover -s tests/integration -p "test_*.py"
 ```
-
-## API Endpoints
-
-### Ingestion
-
-- `POST /ingest/firms`
-- `POST /ingest/sentinel`
-- `POST /ingest/osm_roads`
-- `POST /ingest/run_all`
-- `POST /ingest/scheduler/trigger`
-- `GET /ingest/health`
-
-### Dashboard
-
-- `GET /graph/snapshot`
-- `GET /events/active`
-- `GET /assignments/live`
-- `GET /ui`
-- `GET /ui-api/overview`
-- `GET /ui-api/health`
-- `POST /ui-api/ingest/firms`
-- `POST /ui-api/ingest/sentinel`
-- `POST /ui-api/ingest/osm_roads`
-- `POST /ui-api/ingest/run_all`
-- `POST /ui-api/ingest/scheduler/trigger`
-- `POST /ui-api/agent/run_once`
-- `GET /health`
-
-## Telegram Commands
-
-- `/register <officer_id> <zone_id> [name]`
-- `/status <zone_id_or_zone_name>`
-
-## Demo Flow (Phase 7)
-
-1. Bootstrap graph.
-2. Run ingestion service using cached data.
-3. Trigger ingestion:
-
-```bash
-curl -X POST http://localhost:8001/ingest/run_all
-```
-
-4. Run agent loop and show query outputs + Claude assignment JSON.
-5. Receive Telegram alert on officer account.
-6. Open TigerGraph GraphStudio and show updated `assigned_to` edges.
-
-## Notes
-
-- Keep `.env` out of version control.
-- Cached demo files are recommended for stable stage demos.
-- GitHub Copilot is not exposed as a runtime API for this backend flow; use OpenRouter key for agent inference.

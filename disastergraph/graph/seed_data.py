@@ -9,7 +9,7 @@ from json import loads
 from pathlib import Path
 from typing import Any
 
-from disastergraph.config import get_settings, get_tg_connection
+from disastergraph.config import get_neo4j_connection, get_settings
 from disastergraph.graph.utils import ZoneInfo, haversine_km, list_zones, nearest_zone
 
 
@@ -389,7 +389,7 @@ def seed_fallback_routes(conn: Any, zones: list[ZoneInfo], per_zone_links: int =
 
 def run_seed(conn: Any | None = None) -> dict[str, int]:
     settings = get_settings()
-    conn = conn or get_tg_connection(settings)
+    conn = conn or get_neo4j_connection(settings)
     zones = list_zones(conn)
     if len(zones) < 50:
         from_wards = (

@@ -30,7 +30,7 @@ class TestSeedFallback(unittest.TestCase):
     @patch("disastergraph.graph.seed_data.upsert_zones")
     @patch("disastergraph.graph.seed_data.generate_demo_zones", return_value=[{"id": "z1"}])
     @patch("disastergraph.graph.seed_data.list_zones", return_value=[])
-    @patch("disastergraph.graph.seed_data.get_tg_connection", return_value=object())
+    @patch("disastergraph.graph.seed_data.get_neo4j_connection", return_value=object())
     @patch("disastergraph.graph.seed_data.get_settings")
     def test_run_seed_uses_fallback_and_logs_warning(
         self,

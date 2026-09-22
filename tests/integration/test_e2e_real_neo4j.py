@@ -6,7 +6,7 @@ import unittest
 from typing import Any
 from datetime import datetime, timezone
 
-from disastergraph.config import get_settings, get_tg_connection
+from disastergraph.config import get_neo4j_connection, get_settings
 from disastergraph.graph.utils import list_zones
 from disastergraph.ingestion.firms import ingest_firms_from_csv
 from disastergraph.ingestion.sentinel import ingest_sentinel_cached
@@ -39,37 +39,30 @@ def _rows_from_query(response: Any, expected_key: str) -> list[dict[str, Any]]:
 
 
 def _pick_active_event_id(conn: Any) -> str:
-    events = conn.getVertices("DisasterEvent", select="status", limit=1000)
+    events = conn.getVertices("DisasterEvent", limit=1000)
     for row in events:
         if not isinstance(row, dict):
             continue
-        attrs = row.get("attributes", {})
+        attrs = row.get("attributes", {}) if "attributes" in row else row
         if not isinstance(attrs, dict):
             continue
         if attrs.get("status") == "active":
-            event_id = row.get("v_id")
+            event_id = str(row.get("v_id") or attrs.get("event_id") or "")
             if event_id:
-                return str(event_id)
+                return event_id
     return ""
 
 
-class RealTigerGraphEndToEndTest(unittest.TestCase):
-    def test_real_tigergraph_end_to_end(self) -> None:
+class RealNeo4jEndToEndTest(unittest.TestCase):
+    def test_real_neo4j_end_to_end(self) -> None:
         settings = get_settings()
-        self.assertTrue(settings.tigergraph_host, "Missing TG_HOST")
-        self.assertTrue(settings.tigergraph_username, "Missing TG_USERNAME")
-        self.assertTrue(settings.tigergraph_password, "Missing TG_PASSWORD")
+        self.assertTrue(settings.neo4j_uri, "Missing NEO4J_URI")
 
-        try:
-            conn = get_tg_connection(settings)
-        except RuntimeError as exc:
-            message = str(exc)
-            if "Failed to start workspace" in message or "Auto start is not enabled" in message:
-                self.skipTest("TigerGraph workspace is not running; skipping real E2E test")
-            raise
+        conn = get_neo4j_connection(settings)
+        conn.verify_connectivity()
 
         zones = list_zones(conn)
-        self.assertGreaterEqual(len(zones), 1, "No zones found in graph")
+        self.assertGreaterEqual(len(zones), 1, "No zones found in Neo4j graph")
 
         firms_path = Path(settings.firms_cache_path)
         if firms_path.exists():
@@ -210,24 +203,8 @@ class RealTigerGraphEndToEndTest(unittest.TestCase):
         self.assertTrue(resource_rows, "Resource vertex not found after update")
         first = resource_rows[0] if isinstance(resource_rows, list) else resource_rows
         attrs = first.get("attributes", {}) if isinstance(first, dict) else {}
-        if int(attrs.get("current_load", 0)) != 1:
-            conn.upsertVertex("Resource", resource_id, {"current_load": 1, "is_available": True})
-            resource_rows = conn.getVerticesById("Resource", [resource_id])
-            first = resource_rows[0] if isinstance(resource_rows, list) else resource_rows
-            attrs = first.get("attributes", {}) if isinstance(first, dict) else {}
         self.assertEqual(int(attrs.get("current_load", -1)), 1)
 
-        conn.upsertEdge(
-            "Resource",
-            resource_id,
-            "assigned_to",
-            "Person",
-            person_id,
-            {
-                "assigned_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                "eta_min": 8.0,
-            },
-        )
         assigned_edges = conn.getEdges("Resource", resource_id, "assigned_to")
         self.assertTrue(
             any(isinstance(edge, dict) and str(edge.get("to_id")) == person_id for edge in assigned_edges),

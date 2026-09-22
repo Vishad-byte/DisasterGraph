@@ -22,6 +22,7 @@ class LLMClient:
             return self._complete_claude(prompt)
         return self._complete_openrouter(prompt)
 
+
     def _complete_claude(self, prompt: str) -> str:
         anthropic_mod = importlib.import_module("anthropic")
         client = anthropic_mod.Anthropic(api_key=self.settings.claude_api_key)

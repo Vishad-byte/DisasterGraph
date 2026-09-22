@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from disastergraph.config import get_settings, get_tg_connection
+from disastergraph.config import get_neo4j_connection, get_settings
 from disastergraph.graph.demo_data import load_delhi_flood_2023
 from disastergraph.graph.seed_data import run_seed
 from disastergraph.ingestion.firms import ingest_firms_from_csv
@@ -11,7 +11,7 @@ from disastergraph.ingestion.sentinel import ingest_sentinel_cached
 
 def run_demo_ingestion() -> dict[str, object]:
     settings = get_settings()
-    conn = get_tg_connection(settings)
+    conn = get_neo4j_connection(settings)
 
     seed = run_seed(conn=conn)
     delhi_flood = load_delhi_flood_2023(conn, settings.delhi_flood_cache_path)

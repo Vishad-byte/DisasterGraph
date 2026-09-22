@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import importlib
 import os
-import json
-import base64
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError
 from dataclasses import dataclass
 from typing import Any
+
+from neo4j import GraphDatabase
+
 
 def _load_dotenv() -> bool:
     try:
@@ -24,21 +23,31 @@ def _load_dotenv() -> bool:
 _load_dotenv()
 
 
+PK_MAP: dict[str, str] = {
+    "Person": "id",
+    "Zone": "zone_id",
+    "Resource": "res_id",
+    "Route": "route_id",
+    "DisasterEvent": "event_id",
+    "Officer": "officer_id",
+}
+
+REL_MAP: dict[str, str] = {
+    "located_in": "LOCATED_IN",
+    "affects": "AFFECTS",
+    "serves": "SERVES",
+    "connects": "CONNECTS",
+    "assigned_to": "ASSIGNED_TO",
+    "escalated_from": "ESCALATED_FROM",
+    "manages": "MANAGES",
+}
+
+
 @dataclass(slots=True)
 class Settings:
-    tigergraph_host: str = os.getenv("TG_HOST", "")
-    tigergraph_graph: str = os.getenv("TG_GRAPH", "DisasterGraph")
-    tigergraph_username: str = os.getenv("TG_USERNAME", "")
-    tigergraph_password: str = os.getenv("TG_PASSWORD", "")
-    tigergraph_cloud: bool = os.getenv("TG_CLOUD", "true").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    tigergraph_restpp_port: str = os.getenv("TG_RESTPP_PORT", "443")
-    tigergraph_gs_port: str = os.getenv("TG_GSQL_PORT", "443")
-    tigergraph_secret: str = os.getenv("TG_SECRET", "")
+    neo4j_uri: str = os.getenv("NEO4J_URI", "")
+    neo4j_user: str = os.getenv("NEO4J_USER", os.getenv("NEO4J_USERNAME", "neo4j"))
+    neo4j_password: str = os.getenv("NEO4J_PASSWORD", "")
 
     claude_api_key: str = os.getenv("CLAUDE_API_KEY", "")
     llm_provider: str = os.getenv("LLM_PROVIDER", "openrouter")
@@ -77,64 +86,139 @@ def get_settings() -> Settings:
     return Settings()
 
 
-def get_tg_connection(settings: Settings | None = None, include_graph: bool = True) -> Any:
-    cfg = settings or get_settings()
-    host = (cfg.tigergraph_host or "").strip().strip('"').strip("'")
-    if host and not host.startswith(("http://", "https://")):
-        host = f"https://{host}"
+class Neo4jConnection:
+    def __init__(
+        self,
+        uri: str | None = None,
+        user: str | None = None,
+        password: str | None = None,
+        settings: Settings | None = None,
+    ) -> None:
+        cfg = settings or get_settings()
+        self.uri = uri or cfg.neo4j_uri
+        self.user = user or cfg.neo4j_user
+        self.password = password or cfg.neo4j_password
 
-    if not host:
-        raise ValueError("Missing TG_HOST in environment.")
+        if not self.uri:
+            raise ValueError("Missing NEO4J_URI in environment.")
 
-    py_tg = importlib.import_module("pyTigerGraph")
-    TigerGraphConnection = getattr(py_tg, "TigerGraphConnection")
+        self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
 
-    kwargs: dict[str, Any] = {
-        "host": host,
-        "username": cfg.tigergraph_username,
-        "password": cfg.tigergraph_password,
-        "tgCloud": cfg.tigergraph_cloud,
-        "restppPort": cfg.tigergraph_restpp_port,
-        "gsPort": cfg.tigergraph_gs_port,
-        "sslPort": "443",
-    }
-    if include_graph:
-        kwargs["graphname"] = cfg.tigergraph_graph
-    conn = TigerGraphConnection(**kwargs)
+    def close(self) -> None:
+        self.driver.close()
 
-    if cfg.tigergraph_secret:
-        token = _fetch_tg_token(
-            host=host,
-            username=cfg.tigergraph_username,
-            password=cfg.tigergraph_password,
-            secret=cfg.tigergraph_secret,
+    @staticmethod
+    def _sanitize_val(val: Any) -> Any:
+        if isinstance(val, dict):
+            return {k: Neo4jConnection._sanitize_val(v) for k, v in val.items()}
+        elif isinstance(val, (list, tuple, set)):
+            return [Neo4jConnection._sanitize_val(x) for x in val]
+        elif hasattr(val, "iso_format"):
+            return val.iso_format()
+        elif hasattr(val, "to_native"):
+            return str(val.to_native())
+        return val
+
+    def run_query(self, query: str, parameters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        with self.driver.session() as session:
+            result = session.run(query, parameters or {})
+            return [self._sanitize_val(record.data()) for record in result]
+
+    def verify_connectivity(self) -> None:
+        self.driver.verify_connectivity()
+
+    def _pk(self, label: str) -> str:
+        return PK_MAP.get(label, "id")
+
+    def _rel(self, edge_type: str) -> str:
+        return REL_MAP.get(edge_type, edge_type.upper())
+
+    def upsertVertex(self, vertex_type: str, vertex_id: str, attributes: dict[str, Any] | None = None) -> int:
+        pk = self._pk(vertex_type)
+        props = dict(attributes or {})
+        props[pk] = vertex_id
+
+        cypher = f"MERGE (n:{vertex_type} {{{pk}: $vid}}) SET n += $props RETURN count(n) AS cnt"
+        res = self.run_query(cypher, {"vid": vertex_id, "props": props})
+        return int(res[0]["cnt"]) if res else 1
+
+    def upsertEdge(
+        self,
+        source_type: str,
+        source_id: str,
+        edge_type: str,
+        target_type: str,
+        target_id: str,
+        attributes: dict[str, Any] | None = None,
+    ) -> int:
+        src_pk = self._pk(source_type)
+        dst_pk = self._pk(target_type)
+        rel_name = self._rel(edge_type)
+        props = dict(attributes or {})
+
+        cypher = (
+            f"MATCH (src:{source_type} {{{src_pk}: $src_id}}), (dst:{target_type} {{{dst_pk}: $dst_id}}) "
+            f"MERGE (src)-[r:{rel_name}]->(dst) "
+            f"SET r += $props RETURN count(r) AS cnt"
         )
-        conn.apiToken = token
+        res = self.run_query(cypher, {"src_id": source_id, "dst_id": target_id, "props": props})
+        return int(res[0]["cnt"]) if res else 1
 
-    return conn
+    def getVertices(self, vertex_type: str, limit: int = 10000, select: str | None = None) -> list[dict[str, Any]]:
+        pk = self._pk(vertex_type)
+        cypher = f"MATCH (n:{vertex_type}) RETURN n LIMIT $limit"
+        records = self.run_query(cypher, {"limit": limit})
+        out: list[dict[str, Any]] = []
+        for rec in records:
+            node = rec.get("n", {})
+            if isinstance(node, dict):
+                vid = str(node.get(pk, node.get("id", "")))
+                out.append({"v_id": vid, "attributes": node, **node})
+        return out
+
+    def getVerticesById(self, vertex_type: str, vertex_ids: list[str]) -> list[dict[str, Any]]:
+        pk = self._pk(vertex_type)
+        cypher = f"MATCH (n:{vertex_type}) WHERE n.{pk} IN $ids RETURN n"
+        records = self.run_query(cypher, {"ids": vertex_ids})
+        out: list[dict[str, Any]] = []
+        for rec in records:
+            node = rec.get("n", {})
+            if isinstance(node, dict):
+                vid = str(node.get(pk, node.get("id", "")))
+                out.append({"v_id": vid, "attributes": node, **node})
+        return out
+
+    def getEdges(self, source_type: str, source_id: str, edge_type: str) -> list[dict[str, Any]]:
+        src_pk = self._pk(source_type)
+        rel_name = self._rel(edge_type)
+        cypher = (
+            f"MATCH (src:{source_type} {{{src_pk}: $src_id}})-[r:{rel_name}]->(dst) "
+            f"RETURN labels(dst)[0] AS to_type, dst, properties(r) AS attributes"
+        )
+        records = self.run_query(cypher, {"src_id": source_id})
+        out: list[dict[str, Any]] = []
+        for rec in records:
+            dst_node = rec.get("dst", {})
+            dst_type = rec.get("to_type", "Zone")
+            dst_pk = self._pk(dst_type)
+            to_id = str(dst_node.get(dst_pk, dst_node.get("id", "")))
+            attrs = rec.get("attributes", {}) or {}
+            out.append({
+                "from_id": source_id,
+                "to_id": to_id,
+                "e_type": edge_type,
+                "attributes": attrs,
+                **attrs,
+            })
+        return out
+
+    def runInstalledQuery(self, query_name: str, params: dict[str, Any] | None = None) -> Any:
+        from disastergraph.graph.queries import run_query
+        return run_query(self, query_name, params or {})
 
 
-def _fetch_tg_token(host: str, username: str, password: str, secret: str) -> str:
-    auth = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("utf-8")
-    payload = json.dumps({"secret": secret}).encode("utf-8")
-    req = Request(
-        url=f"{host}:443/gsql/v1/tokens",
-        method="POST",
-        data=payload,
-        headers={
-            "Authorization": f"Basic {auth}",
-            "Content-Type": "application/json",
-        },
-    )
+def get_neo4j_connection(settings: Settings | None = None) -> Neo4jConnection:
+    return Neo4jConnection(settings=settings)
 
-    try:
-        with urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
-    except HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Unable to fetch TigerGraph token: HTTP {exc.code}: {body}") from exc
 
-    token = data.get("token") if isinstance(data, dict) else None
-    if not token:
-        raise RuntimeError(f"Unable to fetch TigerGraph token: unexpected response {data}")
-    return str(token)
+get_tg_connection = get_neo4j_connection

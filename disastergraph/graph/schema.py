@@ -2,49 +2,34 @@ from __future__ import annotations
 
 from typing import Any
 
-from disastergraph.graph.gsql_exec import run_gsql_statement
+from disastergraph.config import Neo4jConnection, get_neo4j_connection
 
-
-SCHEMA_STATEMENTS = [
-    "USE GLOBAL",
-    "CREATE VERTEX Person (PRIMARY_ID id STRING, name STRING, location_lat FLOAT, location_lng FLOAT, vulnerability_score FLOAT, medical_needs STRING, mobility INT)",
-    "CREATE VERTEX Zone (PRIMARY_ID zone_id STRING, name STRING, centroid_lat FLOAT, centroid_lng FLOAT, population_count INT, disaster_severity FLOAT, is_affected BOOL)",
-    "CREATE VERTEX Resource (PRIMARY_ID res_id STRING, resource_type STRING, capacity INT, current_load INT, location_lat FLOAT, location_lng FLOAT, is_available BOOL)",
-    "CREATE VERTEX Route (PRIMARY_ID route_id STRING, start_zone STRING, end_zone STRING, distance_km FLOAT, estimated_time_min FLOAT, is_blocked BOOL, blockage_reason STRING)",
-    "CREATE VERTEX DisasterEvent (PRIMARY_ID event_id STRING, event_type STRING, timestamp DATETIME, severity FLOAT, satellite_source STRING, status STRING)",
-    "CREATE VERTEX Officer (PRIMARY_ID officer_id STRING, name STRING, telegram_chat_id STRING, zone STRING)",
-    "CREATE DIRECTED EDGE located_in (FROM Person, TO Zone)",
-    "CREATE DIRECTED EDGE affects (FROM DisasterEvent, TO Zone, severity FLOAT)",
-    "CREATE DIRECTED EDGE serves (FROM Resource, TO Zone, coverage_radius_km FLOAT)",
-    "CREATE DIRECTED EDGE connects (FROM Zone, TO Zone, route_id STRING, distance_km FLOAT, estimated_time_min FLOAT, is_blocked BOOL, blockage_reason STRING)",
-    "CREATE DIRECTED EDGE assigned_to (FROM Resource, TO Person, assigned_at DATETIME, eta_min FLOAT)",
-    "CREATE DIRECTED EDGE escalated_from (FROM Zone, TO Zone)",
-    "CREATE DIRECTED EDGE manages (FROM Officer, TO Zone)",
-    "CREATE GRAPH DisasterGraph(*)",
+SCHEMA_CONSTRAINTS = [
+    "CREATE CONSTRAINT person_id IF NOT EXISTS FOR (p:Person) REQUIRE p.id IS UNIQUE",
+    "CREATE CONSTRAINT zone_id IF NOT EXISTS FOR (z:Zone) REQUIRE z.zone_id IS UNIQUE",
+    "CREATE CONSTRAINT resource_id IF NOT EXISTS FOR (r:Resource) REQUIRE r.res_id IS UNIQUE",
+    "CREATE CONSTRAINT route_id IF NOT EXISTS FOR (rt:Route) REQUIRE rt.route_id IS UNIQUE",
+    "CREATE CONSTRAINT event_id IF NOT EXISTS FOR (e:DisasterEvent) REQUIRE e.event_id IS UNIQUE",
+    "CREATE CONSTRAINT officer_id IF NOT EXISTS FOR (o:Officer) REQUIRE o.officer_id IS UNIQUE",
+    "CREATE INDEX zone_severity IF NOT EXISTS FOR (z:Zone) ON (z.disaster_severity)",
+    "CREATE INDEX person_vuln IF NOT EXISTS FOR (p:Person) ON (p.vulnerability_score)",
 ]
 
 
-ALTER_STATEMENTS = [
-    "USE GLOBAL",
-]
-
-
-def create_schema(conn: Any) -> str:
-    """Create DisasterGraph schema and graph types if graph does not exist."""
-    listing = run_gsql_statement(conn, "USE GLOBAL\nls")
+def create_schema(conn: Any = None) -> str:
+    """Create Neo4j uniqueness constraints and indexes for DisasterGraph."""
+    neo4j_conn: Neo4jConnection = conn or get_neo4j_connection()
     outputs: list[str] = []
-    bootstrap_statements = SCHEMA_STATEMENTS
-    if "DisasterGraph" in listing:
-        bootstrap_statements = ALTER_STATEMENTS
 
-    for statement in bootstrap_statements:
-        out = run_gsql_statement(conn, statement)
-        low = out.lower()
-        if "semantic check fails" in low and "used by another object" in low:
-            outputs.append(f"[skip-existing] {statement}")
-            continue
-        if "already exists" in low or "has already been created" in low:
-            outputs.append(f"[skip-existing] {statement}")
-            continue
-        outputs.append(out)
+    for stmt in SCHEMA_CONSTRAINTS:
+        try:
+            neo4j_conn.run_query(stmt)
+            outputs.append(f"[OK] {stmt}")
+        except Exception as exc:
+            outputs.append(f"[ERROR] {stmt}: {exc}")
+
     return "\n".join(outputs)
+
+
+if __name__ == "__main__":
+    print(create_schema())

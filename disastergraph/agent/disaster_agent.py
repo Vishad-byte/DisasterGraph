@@ -10,7 +10,7 @@ from typing import Any
 
 from disastergraph.agent.llm_client import LLMClient
 from disastergraph.agent.prompts import build_assignment_prompt
-from disastergraph.config import get_settings, get_tg_connection
+from disastergraph.config import get_neo4j_connection, get_settings
 
 
 LOGGER = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ class Assignment:
 class DisasterGraphAgent:
     def __init__(self) -> None:
         self.settings = get_settings()
-        self.conn = get_tg_connection(self.settings)
+        self.conn = get_neo4j_connection(self.settings)
         self.llm = LLMClient(self.settings)
         self.bot: Any | None = None
         try:

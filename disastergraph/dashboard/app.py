@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from disastergraph.config import get_settings, get_tg_connection
+from disastergraph.config import get_neo4j_connection, get_settings
 from disastergraph.agent.runner import run_detection_cycle_once
 
 
@@ -86,7 +86,7 @@ def _http_post_json(
 
 
 def _conn() -> Any:
-    return get_tg_connection(settings)
+    return get_neo4j_connection(settings)
 
 
 def _as_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:

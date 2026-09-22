@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from disastergraph.config import get_settings, get_tg_connection
+from disastergraph.config import get_neo4j_connection, get_settings
 
 
 LOGGER = logging.getLogger(__name__)
@@ -13,7 +13,7 @@ logging.basicConfig(level=logging.INFO)
 class DisasterGraphTelegramBot:
     def __init__(self) -> None:
         self.settings = get_settings()
-        self.conn = get_tg_connection(self.settings)
+        self.conn = get_neo4j_connection(self.settings)
 
         telegram_ext = __import__("telegram.ext", fromlist=["Application", "CommandHandler"])
         self.Application = getattr(telegram_ext, "Application")
