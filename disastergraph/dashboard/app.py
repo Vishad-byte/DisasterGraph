@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from disastergraph.config import get_neo4j_connection, get_settings
@@ -440,6 +440,11 @@ app.mount(
     StaticFiles(directory=str(frontend_dist / "assets"), check_dir=False),
     name="ui-assets",
 )
+
+
+@app.get("/", include_in_schema=False)
+def root_redirect() -> RedirectResponse:
+    return RedirectResponse(url="/ui")
 
 
 @app.get("/ui", response_class=HTMLResponse)

@@ -7,6 +7,7 @@ import {
   Polyline,
   Popup,
   TileLayer,
+  Tooltip,
   useMap,
 } from 'react-leaflet'
 import { divIcon, latLngBounds } from 'leaflet'
@@ -682,6 +683,7 @@ function LegendModal({
 // ---------------------------------------------------------
 function ZoneDetailDrawer({
   zone,
+  selectedEvent,
   activeEvents,
   routes,
   resources,
@@ -689,6 +691,7 @@ function ZoneDetailDrawer({
   onFocusMap,
 }: {
   zone: ZonePoint | null
+  selectedEvent?: ActiveEvent | null
   activeEvents: ActiveEvent[]
   routes: RouteSegment[]
   resources: ResourceItem[]
@@ -699,10 +702,20 @@ function ZoneDetailDrawer({
 
   const wardTitle = humanizeWardName(zone.id, zone.name)
   const zoneEvents = activeEvents.filter((ev) => (ev.affected_zone_ids || []).includes(zone.id))
-  const primaryEvent = zoneEvents[0]
+  
+  // Prioritize selectedEvent if it relates to this zone, otherwise sort by highest severity
+  const sortedZoneEvents = [...zoneEvents].sort((a, b) => (b.severity || 0) - (a.severity || 0))
+  const primaryEvent = (selectedEvent && (selectedEvent.affected_zone_ids || []).includes(zone.id))
+    ? selectedEvent
+    : (sortedZoneEvents[0] || selectedEvent)
+
   const hazardType = detectHazardType(primaryEvent?.event_type, primaryEvent?.source)
   const hazardConfig = HAZARD_CONFIG[hazardType] || HAZARD_CONFIG.unknown
-  const tier = getSeverityTier(zone.severity)
+
+  // Event incident severity vs zone baseline severity (ensures exact match with alert cards)
+  const activeSeverity = primaryEvent ? Number(primaryEvent.severity || 0) : zone.severity
+  const activeTier = getSeverityTier(activeSeverity)
+  const wardTier = getSeverityTier(zone.severity)
 
   // Connected routes
   const connectedRoutes = routes.filter(
@@ -748,20 +761,22 @@ function ZoneDetailDrawer({
           </div>
         </div>
 
-        {/* Severity Progress */}
+        {/* Severity Progress (Matches active incident alert) */}
         <div className="drawer-metric-box">
           <div className="metric-header-row">
-            <span>Disaster Severity</span>
-            <strong style={{ color: tier.color }}>
-              {tier.label} ({zone.severity.toFixed(3)})
+            <span>
+              {primaryEvent ? `${hazardConfig.shortLabel || 'Incident'} Severity` : 'Disaster Severity'}
+            </span>
+            <strong style={{ color: activeTier.color }}>
+              {activeTier.label} ({activeSeverity.toFixed(2)})
             </strong>
           </div>
           <div className="severity-bar-track">
             <div
               className="severity-bar-fill"
               style={{
-                width: `${Math.min(100, Math.max(8, zone.severity * 100))}%`,
-                backgroundColor: tier.color,
+                width: `${Math.min(100, Math.max(8, activeSeverity * 100))}%`,
+                backgroundColor: activeTier.color,
               }}
             />
           </div>
@@ -771,6 +786,26 @@ function ZoneDetailDrawer({
             <span>0.7 High</span>
             <span>1.0 Critical</span>
           </div>
+
+          {/* Ward Baseline Context */}
+          {primaryEvent && (
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                marginTop: '8px',
+                paddingTop: '6px',
+                borderTop: '1px dashed #e2e8f0',
+                fontSize: '11px',
+                color: '#64748b',
+              }}
+            >
+              <span>Ward Baseline Impact:</span>
+              <span style={{ fontWeight: 600, color: wardTier.color }}>
+                {wardTier.label} ({zone.severity.toFixed(3)})
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Status Breakdown */}
@@ -895,6 +930,7 @@ export default function App() {
   const [legendOpen, setLegendOpen] = useState(false)
   const [legendSection, setLegendSection] = useState<string | null>(null)
   const [selectedZone, setSelectedZone] = useState<ZonePoint | null>(null)
+  const [selectedEvent, setSelectedEvent] = useState<ActiveEvent | null>(null)
   const [selectedAssignment, setSelectedAssignment] = useState<Assignment | null>(null)
   const [focusCenter, setFocusCenter] = useState<LatLngTuple | null>(null)
   const [filterHazardType, setFilterHazardType] = useState<string>('all')
@@ -1194,6 +1230,46 @@ export default function App() {
       return selectedAssignment.fastest_coords as LatLngTuple[]
     }
     return null
+  }, [selectedAssignment])
+
+  // Explicit Origin and Destination coordinates matching the exact ends of the visible route
+  const originCoords: LatLngTuple | null = useMemo(() => {
+    if (!selectedAssignment) return null
+    if (selectedAssignmentRoute && selectedAssignmentRoute.length > 0) {
+      return selectedAssignmentRoute[0]
+    }
+    if (selectedAssignment.resource_lat != null && selectedAssignment.resource_lng != null) {
+      return [selectedAssignment.resource_lat, selectedAssignment.resource_lng] as LatLngTuple
+    }
+    return null
+  }, [selectedAssignment, selectedAssignmentRoute])
+
+  const destCoords: LatLngTuple | null = useMemo(() => {
+    if (!selectedAssignment) return null
+    if (selectedAssignmentRoute && selectedAssignmentRoute.length > 0) {
+      return selectedAssignmentRoute[selectedAssignmentRoute.length - 1]
+    }
+    if (selectedAssignment.person_lat != null && selectedAssignment.person_lng != null) {
+      return [selectedAssignment.person_lat, selectedAssignment.person_lng] as LatLngTuple
+    }
+    return null
+  }, [selectedAssignment, selectedAssignmentRoute])
+
+  const originStationLabel = useMemo(() => {
+    if (!selectedAssignment) return 'Emergency Station / Depot'
+    if (selectedAssignment.road_names && selectedAssignment.road_names.length > 0) {
+      return `Station near ${selectedAssignment.road_names[0]}`
+    }
+    return 'Emergency Response Depot'
+  }, [selectedAssignment])
+
+  const destResidentLabel = useMemo(() => {
+    if (!selectedAssignment) return 'Target Resident'
+    const ward = selectedAssignment.person_zone || 'Destination Ward'
+    if (selectedAssignment.road_names && selectedAssignment.road_names.length > 1) {
+      return `${selectedAssignment.person_name} (${ward}, near ${selectedAssignment.road_names[selectedAssignment.road_names.length - 1]})`
+    }
+    return `${selectedAssignment.person_name} (${ward})`
   }, [selectedAssignment])
 
   return (
@@ -1779,6 +1855,7 @@ export default function App() {
                       eventHandlers={{
                         click: () => {
                           setSelectedZone(zone)
+                          setSelectedEvent(null)
                         },
                       }}
                       pathOptions={{
@@ -1949,6 +2026,11 @@ export default function App() {
                             </span>
                           </div>
                           <strong>{selectedAssignment.resource_name || 'Emergency Dispatch'}</strong>
+                          <div className="popup-route-endpoints" style={{ margin: '8px 0', fontSize: '11.5px', lineHeight: '1.45', background: '#f8fafc', padding: '6px 8px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                            <div style={{ color: '#15803d', fontWeight: 600 }}>🟢 <strong>From (Source):</strong> {selectedAssignment.resource_name || 'Ambulance'} • {originStationLabel}</div>
+                            <div style={{ color: '#b91c1c', fontWeight: 600, marginTop: '3px' }}>🔴 <strong>To (Destination):</strong> {destResidentLabel}</div>
+                            <div style={{ color: '#64748b', fontSize: '10.5px', marginTop: '2px' }}>Medical Need: {selectedAssignment.medical_needs || 'Urgent care'}</div>
+                          </div>
                           <p className="popup-reason">
                             <strong>Reason:</strong>{' '}
                             {selectedAssignment.ai_reason || 'Verified safe route computed by deterministic road graph.'}
@@ -1963,47 +2045,115 @@ export default function App() {
                     </Polyline>
                   )}
 
-                  {/* Dispatch Origin Marker (Ambulance) */}
-                  {selectedAssignment.resource_lat && selectedAssignment.resource_lng && (
-                    <Marker
-                      position={[selectedAssignment.resource_lat, selectedAssignment.resource_lng] as LatLngTuple}
-                      icon={divIcon({
-                        className: 'origin-marker',
-                        html: '<div style="font-size:24px; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.4));">🚑</div>',
-                        iconSize: [28, 28],
-                        iconAnchor: [14, 14],
-                      })}
-                    >
-                      <Popup>
-                        <div className="popup-wrap">
-                          <span className="badge badge-clear">Origin Asset</span>
-                          <strong>{selectedAssignment.resource_name || 'Ambulance'}</strong>
-                          <p>Ready for dispatch</p>
-                        </div>
-                      </Popup>
-                    </Marker>
+                  {/* Dispatch Origin Marker (Start / Ambulance) */}
+                  {originCoords && (
+                    <>
+                      {/* Outer pulsing ring for visibility */}
+                      <CircleMarker
+                        center={originCoords}
+                        radius={20}
+                        pathOptions={{
+                          color: '#16a34a',
+                          fillColor: '#16a34a',
+                          fillOpacity: 0.25,
+                          weight: 2,
+                        }}
+                      />
+                      {/* Inner solid anchor */}
+                      <CircleMarker
+                        center={originCoords}
+                        radius={12}
+                        pathOptions={{
+                          color: '#ffffff',
+                          fillColor: '#15803d',
+                          fillOpacity: 1,
+                          weight: 3,
+                        }}
+                      >
+                        <Tooltip
+                          permanent
+                          direction="top"
+                          className="route-endpoint-tooltip origin"
+                          offset={[0, -10]}
+                        >
+                          🟢 START: {selectedAssignment.resource_name || 'Ambulance'}
+                        </Tooltip>
+                        <Popup>
+                          <div className="popup-wrap">
+                            <span className="badge badge-clear">Dispatch Source / Start Point</span>
+                            <strong>{selectedAssignment.resource_name || 'Emergency Ambulance'}</strong>
+                            <p><strong>Location:</strong> {originStationLabel}</p>
+                            <p className="popup-hint">Vehicle starting depot / current staging location</p>
+                          </div>
+                        </Popup>
+                      </CircleMarker>
+                      {/* Ambulance Icon Marker directly on point */}
+                      <Marker
+                        position={originCoords}
+                        icon={divIcon({
+                          className: 'route-endpoint-pin-container',
+                          html: '<div class="endpoint-map-icon">🚑</div>',
+                          iconSize: [36, 36],
+                          iconAnchor: [18, 18],
+                        })}
+                      />
+                    </>
                   )}
 
-                  {/* Dispatch Destination Marker (Patient) */}
-                  {selectedAssignment.person_lat && selectedAssignment.person_lng && (
-                    <Marker
-                      position={[selectedAssignment.person_lat, selectedAssignment.person_lng] as LatLngTuple}
-                      icon={divIcon({
-                        className: 'dest-marker',
-                        html: '<div style="font-size:26px; filter: drop-shadow(0 2px 5px rgba(0,0,0,0.5));">📍</div>',
-                        iconSize: [28, 28],
-                        iconAnchor: [14, 26],
-                      })}
-                    >
-                      <Popup>
-                        <div className="popup-wrap">
-                          <span className="badge badge-avoid">Evacuation Target</span>
-                          <strong>{selectedAssignment.person_name}</strong>
-                          <p>Zone: {selectedAssignment.person_zone || 'Central Ward'}</p>
-                          <p>Needs: {selectedAssignment.medical_needs || 'Urgent medical care'}</p>
-                        </div>
-                      </Popup>
-                    </Marker>
+                  {/* Dispatch Destination Marker (End / Resident) */}
+                  {destCoords && (
+                    <>
+                      {/* Outer pulsing ring for visibility */}
+                      <CircleMarker
+                        center={destCoords}
+                        radius={20}
+                        pathOptions={{
+                          color: '#dc2626',
+                          fillColor: '#dc2626',
+                          fillOpacity: 0.25,
+                          weight: 2,
+                        }}
+                      />
+                      {/* Inner solid anchor */}
+                      <CircleMarker
+                        center={destCoords}
+                        radius={12}
+                        pathOptions={{
+                          color: '#ffffff',
+                          fillColor: '#b91c1c',
+                          fillOpacity: 1,
+                          weight: 3,
+                        }}
+                      >
+                        <Tooltip
+                          permanent
+                          direction="top"
+                          className="route-endpoint-tooltip dest"
+                          offset={[0, -10]}
+                        >
+                          🔴 DESTINATION: {selectedAssignment.person_name}
+                        </Tooltip>
+                        <Popup>
+                          <div className="popup-wrap">
+                            <span className="badge badge-avoid">Evacuation Target / End Point</span>
+                            <strong>{selectedAssignment.person_name}</strong>
+                            <p><strong>Destination:</strong> {destResidentLabel}</p>
+                            <p><strong>Medical Need:</strong> <strong>{selectedAssignment.medical_needs || 'Urgent medical care'}</strong></p>
+                            <p className="popup-hint">Resident waiting for medical dispatch</p>
+                          </div>
+                        </Popup>
+                      </CircleMarker>
+                      {/* Resident Target Pin Icon directly on point */}
+                      <Marker
+                        position={destCoords}
+                        icon={divIcon({
+                          className: 'route-endpoint-pin-container',
+                          html: '<div class="endpoint-map-icon">📍</div>',
+                          iconSize: [36, 36],
+                          iconAnchor: [18, 18],
+                        })}
+                      />
+                    </>
                   )}
                 </>
               )}
@@ -2030,6 +2180,30 @@ export default function App() {
                   >
                     ✕
                   </button>
+                </div>
+
+                {/* Explicit Start & Destination Card */}
+                <div className="route-endpoints-card">
+                  <div className="endpoint-row start-endpoint">
+                    <span className="endpoint-chip chip-start">START / SOURCE</span>
+                    <div className="endpoint-details">
+                      <strong>🚑 {selectedAssignment.resource_name || 'Ambulance'}</strong>
+                      <span>{originStationLabel}</span>
+                    </div>
+                  </div>
+                  <div className="endpoint-track-line">
+                    <div className="track-pipe" />
+                    <span className="track-distance">
+                      {Number(selectedAssignment.distance_km ?? 0).toFixed(1)} km corridor ({Number(selectedAssignment.eta_min ?? 0).toFixed(1)} min)
+                    </span>
+                  </div>
+                  <div className="endpoint-row dest-endpoint">
+                    <span className="endpoint-chip chip-dest">DESTINATION / END</span>
+                    <div className="endpoint-details">
+                      <strong>📍 {selectedAssignment.person_name}</strong>
+                      <span>{destResidentLabel} • Need: {selectedAssignment.medical_needs || 'Urgent care'}</span>
+                    </div>
+                  </div>
                 </div>
 
                 <div className="route-kpi-row">
@@ -2113,10 +2287,14 @@ export default function App() {
             {/* Zone Detail Drawer */}
             <ZoneDetailDrawer
               zone={selectedZone}
+              selectedEvent={selectedEvent}
               activeEvents={rawEvents}
               routes={routes}
               resources={resourcesList}
-              onClose={() => setSelectedZone(null)}
+              onClose={() => {
+                setSelectedZone(null)
+                setSelectedEvent(null)
+              }}
               onFocusMap={(lat, lng) => {
                 setFocusCenter([lat, lng])
               }}
@@ -2197,6 +2375,7 @@ export default function App() {
                       onClick={() => {
                         if (primaryZone) {
                           setSelectedZone(primaryZone)
+                          setSelectedEvent(event)
                           setFocusCenter([primaryZone.lat, primaryZone.lng])
                         }
                       }}
