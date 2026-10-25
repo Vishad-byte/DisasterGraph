@@ -7,3 +7,5 @@ __pycache__/
 *.pyd
 frontend/node_modules/
 frontend/dist/
+
+graph-ml-notebooks/
