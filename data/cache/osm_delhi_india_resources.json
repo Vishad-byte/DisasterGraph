@@ -1,0 +1,26 @@
+[
+  {
+    "res_id": "osm_fire_station_001",
+    "resource_type": "fire_station",
+    "name": "OSM Fire Station 1",
+    "location_lat": 28.6189,
+    "location_lng": 77.214,
+    "capacity": 8,
+    "capacity_source": "estimated",
+    "current_load": 0,
+    "is_available": true,
+    "source": "OSM"
+  },
+  {
+    "res_id": "osm_police_002",
+    "resource_type": "police",
+    "name": "OSM Police 2",
+    "location_lat": 28.7091,
+    "location_lng": 77.1075,
+    "capacity": 20,
+    "capacity_source": "estimated",
+    "current_load": 0,
+    "is_available": true,
+    "source": "OSM"
+  }
+]

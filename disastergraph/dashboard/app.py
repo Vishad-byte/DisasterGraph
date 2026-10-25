@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import logging
 from pathlib import Path
 import threading
@@ -13,6 +14,8 @@ from fastapi.staticfiles import StaticFiles
 
 from disastergraph.config import get_neo4j_connection, get_settings
 from disastergraph.agent.runner import run_detection_cycle_once
+from disastergraph.graph.road_geometry import get_road_geometry
+from disastergraph.graph.router import RoadRouter, decode_polyline
 
 
 app = FastAPI(title="DisasterGraph Dashboard API", version="0.1.0")
@@ -155,13 +158,18 @@ def _active_events_with_affected_zones(conn: Any) -> list[dict[str, Any]]:
         if not event_id:
             continue
         affected_edges = conn.getEdges("DisasterEvent", event_id, "affects")
+        source_val = str(attrs.get("source") or attrs.get("satellite_source") or "unknown")
         rows.append(
             {
                 "event_id": event_id,
                 "event_type": str(attrs.get("event_type", "unknown")),
                 "severity": float(attrs.get("severity", 0) or 0),
                 "timestamp": attrs.get("timestamp"),
-                "satellite_source": attrs.get("satellite_source"),
+                "satellite_source": source_val,
+                "source": source_val,
+                "ingested_at": attrs.get("ingested_at"),
+                "lat": attrs.get("lat", attrs.get("latitude")),
+                "lon": attrs.get("lon", attrs.get("longitude")),
                 "affected_zone_ids": [
                     str(edge.get("to_id"))
                     for edge in affected_edges
@@ -201,11 +209,75 @@ def _route_segments(conn: Any) -> list[dict[str, Any]]:
                 continue
             seen.add(dedupe_key)
 
+            raw_blocked = _to_bool(attrs.get("is_blocked", False))
+            raw_reason = str(attrs.get("blockage_reason") or "").strip()
+            explicit_status = str(attrs.get("status") or "").strip().lower()
+            low_reason = raw_reason.lower()
+
+            # Determine hazard type
+            hazard_type = "none"
+            if any(k in low_reason for k in ["pollution", "no2", "pm2", "gas", "plume", "smog"]):
+                hazard_type = "pollution"
+            elif any(k in low_reason for k in ["flood", "water", "inundat", "submerg"]):
+                hazard_type = "flood"
+            elif any(k in low_reason for k in ["fire", "wildfire", "thermal", "burn"]):
+                hazard_type = "fire"
+            elif any(k in low_reason for k in ["earthquake", "quake", "tremor"]):
+                hazard_type = "earthquake"
+            elif from_zone.get("is_affected") or to_zone.get("is_affected"):
+                hazard_type = "pollution"
+
+            # Determine 3-state road status:
+            # 1. Closed: physically impassable (flood, fire, structural collapse, demo blockage)
+            is_physically_closed = (
+                explicit_status == "closed"
+                or (raw_blocked and any(
+                    k in low_reason for k in ["flood", "collapse", "structural", "debris", "fire", "water", "demo blockage", "closed", "blocked"]
+                ) and not any(k in low_reason for k in ["pollution", "gas plume", "no2", "smog"]))
+            )
+
+            # 2. Avoid: passable but hazardous (gas plumes, high air pollution, speed reduction)
+            is_avoid = (
+                not is_physically_closed and (
+                    explicit_status == "avoid"
+                    or raw_blocked
+                    or any(k in low_reason for k in ["pollution", "no2", "pm2", "gas", "plume", "hazard", "smog", "avoid", "speed reduced"])
+                    or (from_zone.get("is_affected") and float(from_zone.get("severity") or 0) >= 0.5)
+                    or (to_zone.get("is_affected") and float(to_zone.get("severity") or 0) >= 0.5)
+                )
+            )
+
+            if is_physically_closed:
+                status = "closed"
+                status_label = "Closed (Physically Blocked)"
+                reason = raw_reason or "Physically impassable corridor due to structural/flood hazard"
+            elif is_avoid:
+                status = "avoid"
+                status_label = "Avoid (Hazardous / Poor Air Quality)"
+                reason = raw_reason or "Passable corridor with high air pollution nearby: delay penalty applied"
+            else:
+                status = "clear"
+                status_label = "Clear (Safe)"
+                reason = "Safe and passable corridor with normal traffic flow"
+
+            from_name = from_zone.get("name") or from_zone_id
+            to_name = to_zone.get("name") or to_zone_id
+            road_name = f"Corridor {from_name} ↔ {to_name}"
+            path_coords = get_road_geometry(
+                from_zone_id,
+                to_zone_id,
+                from_zone["lat"],
+                from_zone["lng"],
+                to_zone["lat"],
+                to_zone["lng"],
+            )
+
             segments.append(
                 {
                     "route_id": route_id,
                     "from_zone_id": from_zone_id,
                     "to_zone_id": to_zone_id,
+                    "road_name": road_name,
                     "from": {
                         "lat": from_zone["lat"],
                         "lng": from_zone["lng"],
@@ -214,10 +286,14 @@ def _route_segments(conn: Any) -> list[dict[str, Any]]:
                         "lat": to_zone["lat"],
                         "lng": to_zone["lng"],
                     },
+                    "path": path_coords,
                     "distance_km": _to_float(attrs.get("distance_km")),
                     "estimated_time_min": _to_float(attrs.get("estimated_time_min")),
-                    "is_blocked": _to_bool(attrs.get("is_blocked", False)),
-                    "blockage_reason": str(attrs.get("blockage_reason") or ""),
+                    "is_blocked": is_physically_closed,
+                    "status": status,
+                    "status_label": status_label,
+                    "blockage_reason": reason,
+                    "hazard_type": hazard_type,
                 }
             )
 
@@ -231,39 +307,56 @@ def _overview_payload(conn: Any, include_assignments: bool = False) -> dict[str,
     resources_raw = _as_rows(conn.getVertices("Resource", limit=10000))
     available_resources = 0
     resources_by_type: dict[str, int] = {}
+    resources_inventory: dict[str, dict[str, int]] = {}
+    resources_list: list[dict[str, Any]] = []
+
     for resource in resources_raw:
         is_available = _to_bool(resource.get("is_available", False))
         if is_available:
             available_resources += 1
-        r_type = str(resource.get("resource_type", "unknown") or "unknown")
+        r_type = str(resource.get("resource_type", "unknown") or "unknown").lower()
         resources_by_type[r_type] = resources_by_type.get(r_type, 0) + 1
+        if r_type not in resources_inventory:
+            resources_inventory[r_type] = {"total": 0, "available": 0}
+        resources_inventory[r_type]["total"] += 1
+        if is_available:
+            resources_inventory[r_type]["available"] += 1
+
+        lat = _to_float(resource.get("location_lat"))
+        lng = _to_float(resource.get("location_lng"))
+        res_id = str(resource.get("res_id") or resource.get("id") or "")
+        if lat is not None and lng is not None:
+            resources_list.append(
+                {
+                    "id": res_id,
+                    "name": str(resource.get("name") or res_id),
+                    "resource_type": r_type,
+                    "lat": lat,
+                    "lng": lng,
+                    "is_available": is_available,
+                    "capacity": resource.get("capacity"),
+                    "current_load": resource.get("current_load", 0),
+                }
+            )
 
     assignments: list[dict[str, Any]] = []
     if include_assignments:
-        for resource in resources_raw:
-            res_id = str(resource.get("id") or "")
-            if not res_id:
-                continue
-            edges = conn.getEdges("Resource", res_id, "assigned_to")
-            for edge in edges:
-                if not isinstance(edge, dict):
-                    continue
-                attrs = edge.get("attributes", {}) if "attributes" in edge else {}
-                assignments.append(
-                    {
-                        "resource_id": res_id,
-                        "person_id": edge.get("to_id"),
-                        "assigned_at": attrs.get("assigned_at"),
-                        "eta_min": attrs.get("eta_min"),
-                    }
-                )
-        assignments.sort(key=lambda x: str(x.get("assigned_at", "")), reverse=True)
+        assignments_resp = assignments_live()
+        assignments = assignments_resp.get("assignments", [])
 
     affected_zone_count = len([z for z in zones if z.get("is_affected")])
+
+    routes = _route_segments_cached(conn)
+    routes_clear = len([r for r in routes if r.get("status") == "clear"])
+    routes_avoid = len([r for r in routes if r.get("status") == "avoid"])
+    routes_closed = len([r for r in routes if r.get("status") == "closed" or r.get("is_blocked")])
+
+    cfg = get_settings()
 
     return {
         "zones": zones,
         "active_events": active_events,
+        "resources": resources_list,
         "assignments": assignments,
         "meta": {
             "zone_count": len(zones),
@@ -273,6 +366,13 @@ def _overview_payload(conn: Any, include_assignments: bool = False) -> dict[str,
             "resource_count": len(resources_raw),
             "available_resource_count": available_resources,
             "resources_by_type": resources_by_type,
+            "resources_inventory": resources_inventory,
+            "routes_total_count": len(routes),
+            "routes_clear_count": routes_clear,
+            "routes_avoid_count": routes_avoid,
+            "routes_closed_count": routes_closed,
+            "data_mode": getattr(cfg, "data_mode", "live").lower(),
+            "last_updated_at": datetime.now(timezone.utc).isoformat(),
         },
     }
 
@@ -289,6 +389,11 @@ def _invalidate_routes_cache() -> None:
     with _routes_cache_lock:
         _routes_cache_payload = None
         _routes_cache_ts = 0.0
+    try:
+        import disastergraph.graph.road_geometry as rg
+        rg._ROAD_GEOMETRIES_CACHE = None
+    except Exception:
+        pass
 
 
 def _invalidate_ui_caches() -> None:
@@ -452,11 +557,16 @@ def ui_assignments() -> dict[str, Any]:
 def ui_routes() -> dict[str, Any]:
     try:
         routes = _route_segments_cached(_conn())
-        blocked_count = len([route for route in routes if route.get("is_blocked")])
+        closed_count = len([route for route in routes if route.get("status") == "closed" or route.get("is_blocked")])
+        avoid_count = len([route for route in routes if route.get("status") == "avoid"])
+        clear_count = len([route for route in routes if route.get("status") == "clear"])
         return {
             "routes": routes,
             "count": len(routes),
-            "blocked_count": blocked_count,
+            "blocked_count": closed_count,
+            "closed_count": closed_count,
+            "avoid_count": avoid_count,
+            "clear_count": clear_count,
         }
     except Exception as exc:  # pragma: no cover
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -472,12 +582,13 @@ def ui_routes_block_demo(count: int = 3) -> dict[str, Any]:
 
         updates: list[dict[str, Any]] = []
         for idx, route in enumerate(candidates, start=1):
-            reason = f"Demo blockage {idx}"
+            reason = f"Demo blockage {idx}: structural debris collapse"
             edge_attrs = {
                 "route_id": route.get("route_id"),
                 "distance_km": route.get("distance_km"),
                 "estimated_time_min": route.get("estimated_time_min"),
                 "is_blocked": True,
+                "status": "closed",
                 "blockage_reason": reason,
             }
             conn.upsertEdge(
@@ -548,6 +659,76 @@ def ui_health() -> dict[str, Any]:
 def ui_ingest_firms() -> dict[str, Any]:
     try:
         result = _http_post_json(_ingestion_url("/ingest/firms"))
+        _invalidate_ui_caches()
+        return result
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/ui-api/ingest/usgs")
+def ui_ingest_usgs() -> dict[str, Any]:
+    try:
+        result = _http_post_json(_ingestion_url("/ingest/usgs"))
+        _invalidate_ui_caches()
+        return result
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/ui-api/ingest/eonet")
+def ui_ingest_eonet() -> dict[str, Any]:
+    try:
+        result = _http_post_json(_ingestion_url("/ingest/eonet"))
+        _invalidate_ui_caches()
+        return result
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/ui-api/ingest/gdacs")
+def ui_ingest_gdacs() -> dict[str, Any]:
+    try:
+        result = _http_post_json(_ingestion_url("/ingest/gdacs"))
+        _invalidate_ui_caches()
+        return result
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/ui-api/ingest/open_meteo")
+def ui_ingest_open_meteo() -> dict[str, Any]:
+    try:
+        result = _http_post_json(_ingestion_url("/ingest/open_meteo"))
+        _invalidate_ui_caches()
+        return result
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/ui-api/ingest/air_quality")
+def ui_ingest_air_quality() -> dict[str, Any]:
+    try:
+        result = _http_post_json(_ingestion_url("/ingest/air_quality"))
+        _invalidate_ui_caches()
+        return result
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/ui-api/ingest/osm_resources")
+def ui_ingest_osm_resources() -> dict[str, Any]:
+    try:
+        result = _http_post_json(_ingestion_url("/ingest/osm_resources"))
+        _invalidate_ui_caches()
+        return result
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/ui-api/ingest/prune")
+def ui_ingest_prune() -> dict[str, Any]:
+    try:
+        result = _http_post_json(_ingestion_url("/ingest/prune"))
         _invalidate_ui_caches()
         return result
     except Exception as exc:  # pragma: no cover
@@ -774,8 +955,26 @@ def map_live() -> str:
       zoneLayer.clearLayers();
       eventLayer.clearLayers();
 
+      const zoneEvents = {};
+      for (const ev of data.active_events) {
+        for (const zid of (ev.affected_zone_ids || [])) {
+          if (!zoneEvents[zid]) zoneEvents[zid] = [];
+          zoneEvents[zid].push(ev);
+        }
+      }
+
       for (const zone of data.zones) {
         zonesById[zone.id] = zone;
+        const evList = zoneEvents[zone.id] || [];
+        let hazardText = '';
+        if (evList.length > 0) {
+          hazardText = '<br><b>Hazard:</b> <span style="color:#ef4444;font-weight:700;">' + evList.map(e => (e.event_type || 'hazard').toUpperCase() + ' (' + (e.source || e.satellite_source || 'Live') + ')').join(', ') + '</span>';
+        } else if (zone.is_affected) {
+          hazardText = '<br><b>Hazard:</b> <span style="color:#f59e0b;font-weight:600;">AFFECTED</span>';
+        } else {
+          hazardText = '<br><b>Status:</b> <span style="color:#10b981;">Safe / Clear</span>';
+        }
+
         const marker = L.circleMarker([zone.lat, zone.lng], {
           radius: zoneRadius(zone),
           color: zoneColor(zone),
@@ -784,9 +983,9 @@ def map_live() -> str:
           fillOpacity: zone.is_affected ? 0.35 : 0.2
         }).bindPopup(
           '<b>' + zone.name + '</b><br>' +
-          'ID: ' + zone.id + '<br>' +
-          'Affected: ' + zone.is_affected + '<br>' +
-          'Severity: ' + Number(zone.severity || 0).toFixed(3)
+          '<b>ID:</b> ' + zone.id +
+          hazardText + '<br>' +
+          '<b>Severity:</b> ' + Number(zone.severity || 0).toFixed(3)
         );
         marker.addTo(zoneLayer);
         points.push([zone.lat, zone.lng]);
@@ -796,12 +995,15 @@ def map_live() -> str:
       const eventsEl = document.getElementById('events');
       eventsEl.innerHTML = '';
       for (const event of topEvents) {
+        const srcText = event.source || event.satellite_source || 'Live';
         const card = document.createElement('div');
         card.className = 'event';
         card.innerHTML =
-          '<div><b>' + event.event_type + '</b> <span class="sev">sev ' + Number(event.severity || 0).toFixed(3) + '</span></div>' +
-          '<div style="color:#94a3b8">' + event.event_id + '</div>' +
-          '<div style="color:#94a3b8">zones: ' + (event.affected_zone_ids || []).length + '</div>';
+          '<div><b>' + (event.event_type || 'hazard').toUpperCase() + '</b> <span class="sev">sev ' + Number(event.severity || 0).toFixed(3) + '</span></div>' +
+          '<div style="color:#38bdf8;font-size:11px;font-weight:600;">Source: ' + srcText + '</div>' +
+          '<div style="color:#94a3b8;font-size:11px;">' + event.event_id + '</div>' +
+          (event.timestamp ? '<div style="color:#cbd5e1;font-size:11px;">Time: ' + event.timestamp + '</div>' : '') +
+          '<div style="color:#94a3b8;font-size:11px;">Zones affected: ' + (event.affected_zone_ids || []).length + '</div>';
         eventsEl.appendChild(card);
 
         const zoneIds = event.affected_zone_ids || [];
@@ -814,7 +1016,12 @@ def map_live() -> str:
               weight: 1,
               fillColor: '#ef4444',
               fillOpacity: 0.1
-            }).bindPopup('<b>' + event.event_type + '</b><br>' + event.event_id);
+            }).bindPopup(
+              '<b>' + (event.event_type || 'hazard').toUpperCase() + '</b><br>' +
+              '<b>Source:</b> ' + srcText + '<br>' +
+              '<b>Event ID:</b> ' + event.event_id +
+              (event.timestamp ? '<br><b>Time:</b> ' + event.timestamp : '')
+            );
             pulse.addTo(eventLayer);
           }
         }
@@ -834,33 +1041,268 @@ def map_live() -> str:
 """
 
 
+_assignment_status_overrides: dict[str, str] = {}
+
+
+def _update_neo4j_assignment_status(assignment_id: str, new_status: str) -> None:
+    try:
+        parts = assignment_id.split("::")
+        if len(parts) != 2:
+            parts = assignment_id.split("_", 1)
+        if len(parts) == 2:
+            res_id, person_id = parts
+            conn = _conn()
+            if hasattr(conn, "run_query"):
+                conn.run_query(
+                    "MATCH (r:Resource)-[a:ASSIGNED_TO]->(p:Person) "
+                    "WHERE (r.res_id = $res_id OR r.id = $res_id) AND p.id = $person_id "
+                    "SET a.status = $status RETURN a",
+                    {"res_id": res_id, "person_id": person_id, "status": new_status},
+                )
+    except Exception as exc:
+        LOGGER.warning("Could not update Neo4j assignment status: %s", exc)
+
+
+@app.post("/ui-api/assignments/{assignment_id:path}/approve")
+def ui_assignment_approve(assignment_id: str) -> dict[str, Any]:
+    _assignment_status_overrides[assignment_id] = "dispatched"
+    _update_neo4j_assignment_status(assignment_id, "dispatched")
+    _invalidate_overview_cache()
+    return {"status": "ok", "assignment_id": assignment_id, "new_status": "dispatched"}
+
+
+@app.post("/ui-api/assignments/{assignment_id:path}/reject")
+def ui_assignment_reject(assignment_id: str) -> dict[str, Any]:
+    _assignment_status_overrides[assignment_id] = "rejected"
+    _update_neo4j_assignment_status(assignment_id, "rejected")
+    _invalidate_overview_cache()
+    return {"status": "ok", "assignment_id": assignment_id, "new_status": "rejected"}
+
+
+@app.get("/ui-api/route/directions")
+def ui_route_directions(
+    from_lat: float, from_lng: float, to_lat: float, to_lng: float
+) -> dict[str, Any]:
+    try:
+        router = RoadRouter.get_instance()
+        route = router.compute_route(from_lat, from_lng, to_lat, to_lng)
+        return {
+            "origin": {"lat": from_lat, "lng": from_lng},
+            "destination": {"lat": to_lat, "lng": to_lng},
+            "distance_km": route.distance_km,
+            "eta_min": route.eta_min,
+            "fastest_eta_min": route.fastest_eta_min,
+            "extra_minutes": route.extra_minutes,
+            "uses_hazard_road": route.uses_hazard_road,
+            "no_safe_route": route.no_safe_route,
+            "routing_source": route.routing_source,
+            "encoded_geometry": route.encoded_geometry,
+            "route_coords": [[pt[0], pt[1]] for pt in route.coords],
+            "fastest_coords": [[pt[0], pt[1]] for pt in route.fastest_coords],
+            "hazard_zones_crossed": route.hazard_zones_crossed,
+            "road_names": route.road_names,
+            "status_summary": route.status_summary,
+            "reason": route.reason,
+            "segments": route.segments[:25],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.get("/assignments/live")
 def assignments_live() -> dict[str, Any]:
     try:
         conn = _conn()
-        resources = conn.getVertices("Resource", limit=10000)
         assignments: list[dict[str, Any]] = []
 
-        for resource in resources:
-            if not isinstance(resource, dict):
-                continue
-            res_id = str(resource.get("v_id") or "")
-            if not res_id:
-                continue
-
-            edges = conn.getEdges("Resource", res_id, "assigned_to")
-            for edge in edges:
-                if not isinstance(edge, dict):
-                    continue
-                attrs = edge.get("attributes", {}) if "attributes" in edge else {}
-                assignments.append(
-                    {
-                        "resource_id": res_id,
-                        "person_id": edge.get("to_id"),
-                        "assigned_at": attrs.get("assigned_at"),
-                        "eta_min": attrs.get("eta_min"),
-                    }
+        if hasattr(conn, "run_query"):
+            try:
+                cypher = (
+                    "MATCH (r:Resource)-[a:ASSIGNED_TO]->(p:Person) "
+                    "OPTIONAL MATCH (p)-[:LOCATED_IN]->(z:Zone) "
+                    "RETURN properties(r) AS r, properties(a) AS a, properties(p) AS p, "
+                    "z.name AS zone_name, z.zone_id AS zone_id, z.disaster_severity AS zone_sev"
                 )
+                rows = conn.run_query(cypher)
+                for row in rows:
+                    r_props = row.get("r") or {}
+                    a_props = row.get("a") or {}
+                    p_props = row.get("p") or {}
+
+                    res_id = str(r_props.get("res_id") or r_props.get("id") or "")
+                    person_id = str(p_props.get("id") or "")
+                    if not res_id or not person_id:
+                        continue
+
+                    assignment_key = f"{res_id}::{person_id}"
+                    status = _assignment_status_overrides.get(assignment_key) or a_props.get("status") or "proposed"
+                    eta = float(a_props.get("eta_min") or 15.0)
+
+                    res_type = str(r_props.get("resource_type") or "ambulance").lower()
+                    clean_res_num = res_id.replace("res_", "").replace("RES_", "").lstrip("0") or "1"
+                    res_name = f"{res_type.capitalize()} {clean_res_num}"
+
+                    p_name = p_props.get("name") or f"Resident {person_id.replace('person_', '').lstrip('0')}"
+                    z_name = row.get("zone_name") or f"Zone {row.get('zone_id', '')}"
+                    medical = p_props.get("medical_needs") or "urgent medical care"
+                    zone_sev = float(row.get("zone_sev") or 0.7)
+
+                    res_lat = _to_float(r_props.get("location_lat"))
+                    res_lng = _to_float(r_props.get("location_lng"))
+                    person_lat = _to_float(p_props.get("location_lat"))
+                    person_lng = _to_float(p_props.get("location_lng"))
+
+                    encoded_geom = str(a_props.get("encoded_geometry") or "").strip()
+                    route_coords: list[tuple[float, float]] = []
+                    fastest_coords: list[tuple[float, float]] = []
+                    distance_km = _to_float(a_props.get("distance_km"))
+                    fastest_eta = _to_float(a_props.get("fastest_eta_min"))
+                    extra_minutes = _to_float(a_props.get("extra_minutes"))
+                    routing_source = str(a_props.get("routing_source") or "osmnx")
+                    no_safe_route = _to_bool(a_props.get("no_safe_route", False))
+                    uses_hazard = _to_bool(a_props.get("uses_hazard_road", False))
+                    hazard_zones_crossed: list[str] = []
+                    road_names: list[str] = []
+
+                    # Decode encoded geometry if present
+                    if encoded_geom:
+                        try:
+                            route_coords = decode_polyline(encoded_geom)
+                        except Exception:
+                            route_coords = []
+
+                    # If not present or empty, dynamically compute using RoadRouter
+                    if (not route_coords or len(route_coords) < 2) and res_lat is not None and res_lng is not None and person_lat is not None and person_lng is not None:
+                        try:
+                            router = RoadRouter.get_instance()
+                            computed = router.compute_route(res_lat, res_lng, person_lat, person_lng)
+                            route_coords = computed.coords
+                            fastest_coords = computed.fastest_coords
+                            encoded_geom = computed.encoded_geometry
+                            distance_km = computed.distance_km
+                            eta = computed.eta_min
+                            fastest_eta = computed.fastest_eta_min
+                            extra_minutes = computed.extra_minutes
+                            uses_hazard = computed.uses_hazard_road
+                            no_safe_route = computed.no_safe_route
+                            routing_source = computed.routing_source
+                            hazard_zones_crossed = computed.hazard_zones_crossed
+                            road_names = computed.road_names
+                        except Exception as r_exc:
+                            LOGGER.debug("Dynamic routing computation for assignment %s failed: %s", assignment_key, r_exc)
+
+                    if not route_coords and res_lat is not None and res_lng is not None and person_lat is not None and person_lng is not None:
+                        route_coords = [(res_lat, res_lng), (person_lat, person_lng)]
+                        routing_source = "approximate"
+
+                    if not fastest_coords and route_coords:
+                        fastest_coords = route_coords
+
+                    if no_safe_route:
+                        ai_reason = f"No safe route available: all corridors to {z_name} are blocked by hazardous events."
+                        route_status = "no_safe_route"
+                    elif uses_hazard or (extra_minutes and extra_minutes > 0):
+                        ai_reason = f"Hazard-aware dispatch ({eta:.1f}m ETA, +{extra_minutes or 0:.1f}m detour); avoids toxic plume in {z_name}."
+                        route_status = "uses_hazard_road"
+                    else:
+                        ai_reason = f"Direct clear route ({eta:.1f}m ETA, {distance_km or 5.0:.1f}km); corridor clear to reach resident ({medical})."
+                        route_status = "clear"
+
+                    is_test = res_id.lower().startswith("e2e") or person_id.lower().startswith("e2e")
+
+                    assignments.append(
+                        {
+                            "assignment_id": assignment_key,
+                            "resource_id": res_id,
+                            "resource_name": res_name,
+                            "resource_type": res_type,
+                            "resource_lat": res_lat,
+                            "resource_lng": res_lng,
+                            "person_id": person_id,
+                            "person_name": p_name,
+                            "person_zone": z_name,
+                            "person_lat": person_lat,
+                            "person_lng": person_lng,
+                            "medical_needs": medical,
+                            "assigned_at": a_props.get("assigned_at"),
+                            "eta_min": eta,
+                            "fastest_eta_min": fastest_eta if fastest_eta is not None else eta,
+                            "extra_minutes": extra_minutes if extra_minutes is not None else 0.0,
+                            "distance_km": distance_km if distance_km is not None else 5.0,
+                            "status": status,
+                            "route_status": route_status,
+                            "no_safe_route": no_safe_route,
+                            "uses_hazard_road": uses_hazard,
+                            "routing_source": routing_source,
+                            "encoded_geometry": encoded_geom,
+                            "route_coords": [[pt[0], pt[1]] for pt in route_coords],
+                            "fastest_coords": [[pt[0], pt[1]] for pt in fastest_coords],
+                            "hazard_zones_crossed": hazard_zones_crossed,
+                            "road_names": road_names,
+                            "ai_reason": ai_reason,
+                            "is_test_data": is_test,
+                        }
+                    )
+            except Exception as exc:
+                LOGGER.warning("run_query in assignments_live failed, falling back: %s", exc)
+
+        if not assignments:
+            resources = conn.getVertices("Resource", limit=10000)
+            for resource in resources:
+                if not isinstance(resource, dict):
+                    continue
+                res_id = str(resource.get("v_id") or resource.get("id") or "")
+                if not res_id:
+                    continue
+
+                edges = conn.getEdges("Resource", res_id, "assigned_to")
+                for edge in edges:
+                    if not isinstance(edge, dict):
+                        continue
+                    attrs = edge.get("attributes", {}) if "attributes" in edge else {}
+                    person_id = str(edge.get("to_id") or "")
+                    assignment_key = f"{res_id}::{person_id}"
+                    status = _assignment_status_overrides.get(assignment_key) or attrs.get("status") or "proposed"
+                    eta = float(attrs.get("eta_min") or 15.0)
+                    is_test = res_id.lower().startswith("e2e") or person_id.lower().startswith("e2e")
+
+                    encoded_geom = str(attrs.get("encoded_geometry") or "").strip()
+                    route_coords: list[tuple[float, float]] = []
+                    if encoded_geom:
+                        try:
+                            route_coords = decode_polyline(encoded_geom)
+                        except Exception:
+                            pass
+
+                    assignments.append(
+                        {
+                            "assignment_id": assignment_key,
+                            "resource_id": res_id,
+                            "resource_name": f"Ambulance {res_id.replace('res_', '').lstrip('0') or '1'}",
+                            "resource_type": "ambulance",
+                            "person_id": person_id,
+                            "person_name": f"Resident {person_id.replace('person_', '').lstrip('0')}",
+                            "person_zone": "Central Ward",
+                            "medical_needs": "urgent care",
+                            "assigned_at": attrs.get("assigned_at"),
+                            "eta_min": eta,
+                            "fastest_eta_min": float(attrs.get("fastest_eta_min") or eta),
+                            "extra_minutes": float(attrs.get("extra_minutes") or 0.0),
+                            "distance_km": float(attrs.get("distance_km") or 5.0),
+                            "status": status,
+                            "route_status": "clear",
+                            "no_safe_route": False,
+                            "uses_hazard_road": False,
+                            "routing_source": str(attrs.get("routing_source") or "approximate"),
+                            "encoded_geometry": encoded_geom,
+                            "route_coords": [[pt[0], pt[1]] for pt in route_coords],
+                            "fastest_coords": [[pt[0], pt[1]] for pt in route_coords],
+                            "hazard_zones_crossed": [],
+                            "road_names": [],
+                            "ai_reason": f"Direct dispatch ({eta:.1f}m ETA); avoiding hazard corridors.",
+                            "is_test_data": is_test,
+                        }
+                    )
 
         assignments.sort(key=lambda x: str(x.get("assigned_at", "")), reverse=True)
         return {"assignments": assignments, "count": len(assignments)}

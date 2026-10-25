@@ -82,6 +82,68 @@ class Settings:
     }
 
 
+    data_mode: str = os.getenv("DATA_MODE", "demo").strip().lower()
+    target_city: str = os.getenv("TARGET_CITY", "Delhi, India")
+    bbox_raw: str = os.getenv("BBOX", "28.38,76.78,28.92,77.42")
+    openaq_api_key: str = os.getenv("OPENAQ_API_KEY", "")
+    groq_api_key: str = os.getenv("GROQ_API_KEY", "")
+    gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
+    event_ttl_hours: int = int(os.getenv("EVENT_TTL_HOURS", "24"))
+
+    poll_interval_firms: int = int(os.getenv("POLL_INTERVAL_FIRMS", "900"))
+    poll_interval_usgs: int = int(os.getenv("POLL_INTERVAL_USGS", "60"))
+    poll_interval_eonet: int = int(os.getenv("POLL_INTERVAL_EONET", "600"))
+    poll_interval_gdacs: int = int(os.getenv("POLL_INTERVAL_GDACS", "600"))
+    poll_interval_open_meteo: int = int(os.getenv("POLL_INTERVAL_OPEN_METEO", "1800"))
+    poll_interval_air_quality: int = int(os.getenv("POLL_INTERVAL_AIR_QUALITY", "900"))
+    poll_interval_prune: int = int(os.getenv("POLL_INTERVAL_PRUNE", "3600"))
+
+    osm_cache_dir: str = os.getenv("OSM_CACHE_DIR", "data/cache")
+
+    routing_provider: str = os.getenv("ROUTING_PROVIDER", "osmnx").strip().lower()
+    routing_bbox: str = os.getenv("ROUTING_BBOX", "28.38,76.78,28.92,77.42").strip()
+    road_graph_cache_path: str = os.getenv(
+        "ROAD_GRAPH_CACHE_PATH", "data/cache/osm_delhi_india_roads.graphml"
+    ).strip()
+    hazard_penalty_avoid: str = os.getenv("HAZARD_PENALTY_AVOID", "1.5,4.0").strip()
+    hazard_buffer_m: float = float(os.getenv("HAZARD_BUFFER_M", "500.0"))
+
+    def get_routing_bbox(self) -> tuple[float, float, float, float]:
+        """Returns (south, west, north, east) for routing bounding box."""
+        try:
+            parts = [float(x.strip()) for x in self.routing_bbox.split(",")]
+            if len(parts) == 4:
+                return (parts[0], parts[1], parts[2], parts[3])
+        except Exception:
+            pass
+        return (28.38, 76.78, 28.92, 77.42)
+
+    def get_hazard_penalties(self) -> tuple[float, float]:
+        """Returns (penalty_min, penalty_max)."""
+        try:
+            parts = [float(x.strip()) for x in self.hazard_penalty_avoid.split(",")]
+            if len(parts) == 2:
+                return (parts[0], parts[1])
+        except Exception:
+            pass
+        return (1.5, 4.0)
+
+    def get_bbox(self) -> tuple[float, float, float, float]:
+        """Returns (south, west, north, east)."""
+        try:
+            parts = [float(x.strip()) for x in self.bbox_raw.split(",")]
+            if len(parts) == 4:
+                return (parts[0], parts[1], parts[2], parts[3])
+        except Exception:
+            pass
+        return (28.38, 76.78, 28.92, 77.42)
+
+    def get_firms_bbox(self) -> tuple[float, float, float, float]:
+        """Returns (west, south, east, north) for NASA FIRMS API."""
+        s, w, n, e = self.get_bbox()
+        return (w, s, e, n)
+
+
 def get_settings() -> Settings:
     return Settings()
 

@@ -208,5 +208,9 @@ def run_query(conn: Any, query_name: str, params: dict[str, Any]) -> Any:
             conn, params.get("event_id", ""), int(params.get("hops", 1))
         )
         return [{"frontier": frontier}]
+    elif query_name == "pruneStaleEvents":
+        from disastergraph.ingestion.pruner import prune_stale_events
+        res = prune_stale_events(conn, int(params.get("ttl_hours", 24)))
+        return [{"prune": res}]
     else:
         raise ValueError(f"Unknown query name: {query_name}")

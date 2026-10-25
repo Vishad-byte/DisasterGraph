@@ -13,6 +13,9 @@ SCHEMA_CONSTRAINTS = [
     "CREATE CONSTRAINT officer_id IF NOT EXISTS FOR (o:Officer) REQUIRE o.officer_id IS UNIQUE",
     "CREATE INDEX zone_severity IF NOT EXISTS FOR (z:Zone) ON (z.disaster_severity)",
     "CREATE INDEX person_vuln IF NOT EXISTS FOR (p:Person) ON (p.vulnerability_score)",
+    "CREATE INDEX event_status IF NOT EXISTS FOR (e:DisasterEvent) ON (e.status)",
+    "CREATE INDEX event_source IF NOT EXISTS FOR (e:DisasterEvent) ON (e.source)",
+    "CREATE INDEX event_timestamp IF NOT EXISTS FOR (e:DisasterEvent) ON (e.timestamp)",
 ]
 
 

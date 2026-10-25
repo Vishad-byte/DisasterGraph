@@ -272,6 +272,17 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["blocked_count"], 0)
         self.assertEqual(payload["routes"][0]["route_id"], "route_001")
 
+    @patch("disastergraph.dashboard.app._conn", return_value=FakeDashboardConn())
+    def test_ui_assignment_approve_reject(self, _mock_conn) -> None:
+        with TestClient(app) as client:
+            resp1 = client.post("/ui-api/assignments/res_001::person_001/approve")
+            self.assertEqual(resp1.status_code, 200)
+            self.assertEqual(resp1.json()["new_status"], "dispatched")
+
+            resp2 = client.post("/ui-api/assignments/res_001::person_001/reject")
+            self.assertEqual(resp2.status_code, 200)
+            self.assertEqual(resp2.json()["new_status"], "rejected")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -149,6 +149,7 @@ def seed_people(conn: Any, zones: list[ZoneInfo], count: int = 200) -> int:
                 "vulnerability_score": vulnerability,
                 "medical_needs": random.choice(needs),
                 "mobility": random.choices([0, 1, 2], weights=[0.6, 0.3, 0.1], k=1)[0],
+                "source": "synthetic",
             },
         )
         writes += conn.upsertEdge("Person", person_id, "located_in", "Zone", zone.zone_id)
@@ -192,6 +193,8 @@ def seed_resources(conn: Any, zones: list[ZoneInfo]) -> int:
                     "location_lat": zone.centroid_lat + random.uniform(-0.02, 0.02),
                     "location_lng": zone.centroid_lng + random.uniform(-0.02, 0.02),
                     "is_available": current_load < capacity,
+                    "source": "synthetic",
+                    "capacity_source": "estimated",
                 },
             )
 
@@ -402,11 +405,13 @@ def run_seed(conn: Any | None = None) -> dict[str, int]:
     else:
         zones = zones[:50]
 
+    is_live = getattr(settings, "data_mode", "demo") == "live"
+
     counts = {
         "zones": len(zones),
         "people_writes": seed_people(conn, zones, 200),
         "resource_writes": seed_resources(conn, zones),
-        "event_writes": seed_events(conn, zones),
+        "event_writes": 0 if is_live else seed_events(conn, zones),
         "route_writes": 0,
     }
 

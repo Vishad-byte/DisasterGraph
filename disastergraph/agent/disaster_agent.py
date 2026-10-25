@@ -11,6 +11,7 @@ from typing import Any
 from disastergraph.agent.llm_client import LLMClient
 from disastergraph.agent.prompts import build_assignment_prompt
 from disastergraph.config import get_neo4j_connection, get_settings
+from disastergraph.graph.router import RoadRouter, ComputedRoute
 
 
 LOGGER = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ class DisasterGraphAgent:
         except Exception as exc:
             LOGGER.warning("Telegram bot initialization skipped: %s", exc)
         self.officer_chat_ids = self._load_officer_chat_ids()
+        self.router = RoadRouter.get_instance(self.settings)
 
         if self.settings.llm_provider == "claude" and not self.settings.claude_api_key:
             LOGGER.warning("CLAUDE_API_KEY is empty; assignment generation will fail.")
@@ -87,9 +89,54 @@ class DisasterGraphAgent:
                 event_ids.append(str(event_id))
         return event_ids
 
+    def _extract_active_hazards(self) -> list[dict[str, Any]]:
+        hazards: list[dict[str, Any]] = []
+        if hasattr(self.conn, "run_query"):
+            try:
+                cypher = (
+                    "MATCH (d:DisasterEvent {status: 'active'}) "
+                    "OPTIONAL MATCH (d)-[:AFFECTS]->(z:Zone) "
+                    "RETURN properties(d) as d, collect(z.zone_id) as zones, "
+                    "avg(z.centroid_lat) as avg_lat, avg(z.centroid_lng) as avg_lng"
+                )
+                rows = self.conn.run_query(cypher)
+                for r in rows:
+                    d_props = r.get("d") or {}
+                    lat = d_props.get("lat") or d_props.get("latitude") or r.get("avg_lat")
+                    lng = d_props.get("lng") or d_props.get("longitude") or d_props.get("lon") or r.get("avg_lng")
+                    if lat is not None and lng is not None:
+                        hazards.append({
+                            "event_id": str(d_props.get("event_id") or ""),
+                            "event_type": str(d_props.get("event_type") or "hazard"),
+                            "severity": float(d_props.get("severity") or 0.5),
+                            "lat": float(lat),
+                            "lng": float(lng),
+                            "radius_meters": float(d_props.get("radius_meters") or 1500.0),
+                        })
+            except Exception as exc:
+                LOGGER.warning("Could not query active hazards via run_query: %s", exc)
+        return hazards
+
+    def _zone_centroid(self, zone_id: str) -> tuple[float, float]:
+        if hasattr(self.conn, "run_query"):
+            try:
+                rows = self.conn.run_query(
+                    "MATCH (z:Zone {zone_id: $zid}) RETURN z.centroid_lat as lat, z.centroid_lng as lng",
+                    {"zid": zone_id},
+                )
+                if rows and rows[0].get("lat") is not None and rows[0].get("lng") is not None:
+                    return (float(rows[0]["lat"]), float(rows[0]["lng"]))
+            except Exception:
+                pass
+        return (28.6139, 77.2090)
+
     def run_detection_cycle(self) -> None:
         event_ids = self._extract_event_ids()
         LOGGER.info("Active events found: %s", len(event_ids))
+
+        # Synchronize active hazards with RoadRouter
+        active_hazards = self._extract_active_hazards()
+        self.router.update_hazard_penalties(active_hazards)
 
         for event_id in event_ids:
             affected_resp = self.conn.runInstalledQuery(
@@ -122,7 +169,45 @@ class DisasterGraphAgent:
                 if not resources:
                     continue
 
-                first_resource = resources[0]
+                # Target victim location for precise road routing
+                first_victim = victims[0]
+                target_lat = float(first_victim.get("location_lat") or zone.get("centroid_lat") or 28.6139)
+                target_lng = float(first_victim.get("location_lng") or zone.get("centroid_lng") or 77.2090)
+
+                # Precompute deterministic road routes & ETAs for top candidate ambulances
+                candidates: list[dict[str, Any]] = []
+                for res in resources[:5]:
+                    r_id = str(res.get("id") or res.get("res_id") or "")
+                    r_lat = res.get("location_lat")
+                    r_lng = res.get("location_lng")
+                    if r_lat is None or r_lng is None:
+                        r_zone_id = self._resource_zone(res, fallback_zone=zone_id)
+                        r_lat, r_lng = self._zone_centroid(r_zone_id)
+
+                    route_calc = self.router.compute_route(
+                        float(r_lat), float(r_lng), target_lat, target_lng
+                    )
+                    candidates.append(
+                        {
+                            "resource_id": r_id,
+                            "resource_name": str(res.get("name") or f"Ambulance {r_id}"),
+                            "resource_type": "ambulance",
+                            "eta_min": route_calc.eta_min,
+                            "distance_km": route_calc.distance_km,
+                            "fastest_eta_min": route_calc.fastest_eta_min,
+                            "extra_minutes": route_calc.extra_minutes,
+                            "uses_hazard_road": route_calc.uses_hazard_road,
+                            "hazard_zones_crossed": route_calc.hazard_zones_crossed,
+                            "no_safe_route": route_calc.no_safe_route,
+                            "route": route_calc,
+                            "resource_raw": res,
+                        }
+                    )
+
+                # Sort candidates: prioritize safe routes, then lowest ETA
+                candidates.sort(key=lambda c: (1 if c["no_safe_route"] else 0, c["eta_min"]))
+
+                first_resource = candidates[0]["resource_raw"]
                 resource_zone = self._resource_zone(first_resource, fallback_zone=zone_id)
                 route_resp = self.conn.runInstalledQuery(
                     "shortestPassableRoute",
@@ -135,43 +220,71 @@ class DisasterGraphAgent:
 
                 if self.settings.agent_verbose:
                     LOGGER.info(
-                        "Event %s zone %s: victims=%s resources=%s route=%s",
+                        "Event %s zone %s: victims=%s candidates=%s",
                         event_id,
                         zone_id,
                         len(victims),
-                        len(resources),
-                        route,
+                        len(candidates),
                     )
 
-                assignment = self.generate_assignment(zone, victims, resources, route)
+                assignment = self.generate_assignment(
+                    zone, victims, resources, route, candidates=candidates
+                )
                 if not assignment.resource_id or not assignment.top_victim_id:
                     continue
 
-                if self.settings.agent_verbose:
-                    LOGGER.info("LLM assignment: %s", assignment)
+                # Match candidate chosen by agent (or fallback to top candidate)
+                chosen_cand = next(
+                    (c for c in candidates if c["resource_id"] == assignment.resource_id),
+                    candidates[0],
+                )
+                chosen_route = chosen_cand["route"]
+                chosen_res_raw = chosen_cand["resource_raw"]
 
-                res_cap = int(first_resource.get("capacity", 0))
-                curr_load = int(first_resource.get("current_load", 0))
+                if self.settings.agent_verbose:
+                    LOGGER.info(
+                        "Verified assignment: resource=%s, real_eta=%.1fm, distance=%.1fkm, hazard_safe=%s",
+                        assignment.resource_id,
+                        chosen_route.eta_min,
+                        chosen_route.distance_km,
+                        not chosen_route.uses_hazard_road,
+                    )
+
+                res_cap = int(chosen_res_raw.get("capacity", 0))
+                curr_load = int(chosen_res_raw.get("current_load", 0))
                 new_load = min(res_cap, curr_load + max(1, assignment.priority_victim_count))
+
                 self.conn.runInstalledQuery(
                     "updateResourceState",
                     {
                         "res_id": assignment.resource_id,
                         "new_load": new_load,
                         "assigned_person": assignment.top_victim_id,
-                        "eta_min": float(assignment.eta),
+                        "eta_min": float(chosen_route.eta_min),
                     },
                 )
+
+                edge_props = {
+                    "assigned_at": int(time.time()),
+                    "computed_at": int(time.time()),
+                    "eta_min": float(chosen_route.eta_min),
+                    "fastest_eta_min": float(chosen_route.fastest_eta_min),
+                    "extra_minutes": float(chosen_route.extra_minutes),
+                    "distance_km": float(chosen_route.distance_km),
+                    "encoded_geometry": str(chosen_route.encoded_geometry),
+                    "routing_source": str(chosen_route.routing_source),
+                    "uses_hazard_road": bool(chosen_route.uses_hazard_road),
+                    "no_safe_route": bool(chosen_route.no_safe_route),
+                    "status": "proposed",
+                    "reason": str(assignment.route_description or chosen_route.reason),
+                }
                 self.conn.upsertEdge(
                     "Resource",
                     assignment.resource_id,
                     "assigned_to",
                     "Person",
                     assignment.top_victim_id,
-                    {
-                        "assigned_at": int(time.time()),
-                        "eta_min": float(assignment.eta),
-                    },
+                    edge_props,
                 )
                 self.send_alert(assignment)
 
@@ -277,9 +390,10 @@ class DisasterGraphAgent:
         zone: dict[str, Any],
         victims: list[dict[str, Any]],
         resources: list[dict[str, Any]],
-        route: dict[str, Any],
+        route: dict[str, Any] | None = None,
+        candidates: list[dict[str, Any]] | None = None,
     ) -> Assignment:
-        prompt = build_assignment_prompt(zone, victims, resources, route)
+        prompt = build_assignment_prompt(zone, victims, resources, route, candidates=candidates)
 
         text = self.llm.complete_json(prompt).strip()
         if text.startswith("```"):
@@ -297,8 +411,30 @@ class DisasterGraphAgent:
                 raise
             payload = json.loads(text[start : end + 1])
 
+        chosen_id = str(payload.get("resource_id", "")).strip()
+        chosen_cand = None
+
+        if candidates:
+            valid_ids = [str(c.get("resource_id", "")).strip() for c in candidates if c.get("resource_id")]
+            if chosen_id not in valid_ids:
+                LOGGER.warning(
+                    "Agent selected invalid/hallucinated resource_id '%s' (not in allowed %s); rejecting and enforcing top deterministic candidate '%s'",
+                    chosen_id,
+                    valid_ids,
+                    valid_ids[0] if valid_ids else "none",
+                )
+                chosen_id = valid_ids[0] if valid_ids else chosen_id
+
+            chosen_cand = next((c for c in candidates if str(c.get("resource_id", "")).strip() == chosen_id), candidates[0])
+
+        real_eta = (
+            float(chosen_cand.get("eta_min", 0.0))
+            if chosen_cand
+            else float(payload.get("eta") or (route.get("total_time", 0.0) if route else 15.0))
+        )
+
         return Assignment(
-            resource_id=str(payload.get("resource_id", "")),
+            resource_id=chosen_id,
             resource_type=str(payload.get("resource_type", "ambulance")),
             destination_zone=str(payload.get("destination_zone", zone.get("id", ""))),
             top_victim_id=str(
@@ -308,10 +444,10 @@ class DisasterGraphAgent:
                 else ""
             ),
             priority_victim_count=int(payload.get("priority_victim_count", 1)),
-            route_description=str(payload.get("route_description", "Route generated.")),
+            route_description=str(payload.get("route_description", "Route generated via road network.")),
             action=str(payload.get("action", "Proceed with dispatch.")),
             alert_message=str(payload.get("alert_message", "Dispatch initiated.")),
-            eta=float(payload.get("eta", route.get("total_time", 0))),
+            eta=real_eta,
         )
 
     def send_alert(self, assignment: Assignment) -> None:
