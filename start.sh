@@ -3,9 +3,13 @@ set -e
 
 echo "=== Starting DisasterGraph Services ==="
 
-# 1. Start Ingestion Service on internal port 8001
-echo "Starting Ingestion Service on port 8001..."
-uvicorn disastergraph.ingestion.main:app --host 127.0.0.1 --port 8001 &
+# 1. Start Ingestion Service as standalone only if explicitly configured
+if [ "$STANDALONE_INGESTION" = "true" ]; then
+    echo "Starting Standalone Ingestion Service on port 8001..."
+    uvicorn disastergraph.ingestion.main:app --host 127.0.0.1 --port 8001 &
+else
+    echo "Running in unified process mode (Dashboard + Ingestion combined to stay well under 512MB RAM)..."
+fi
 
 # 2. Optionally start Telegram Bot if token provided and enabled
 if [ "$ENABLE_BOT" = "true" ] && [ -n "$TELEGRAM_TOKEN" ]; then

@@ -14,7 +14,7 @@ services:
       - key: ROUTING_PROVIDER
         value: osmnx
       - key: INGESTION_SERVICE_URL
-        value: http://127.0.0.1:8001
+        value: internal
       - key: NEO4J_URI
         sync: false
       - key: NEO4J_USER

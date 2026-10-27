@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import logging
 import math
 import os
 import pickle
+import threading
 import time
 import tracemalloc
 from dataclasses import dataclass, field
@@ -130,11 +132,12 @@ class ComputedRoute:
 
 class RoadRouter:
     _instance: RoadRouter | None = None
+    _lock: threading.Lock = threading.Lock()
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self.graph: nx.MultiDiGraph = nx.MultiDiGraph()
-        self.undirected_graph: nx.MultiGraph | None = None
+        self.undirected_graph: Any = None
 
         # Numpy index for rapid snapping
         self.node_ids: np.ndarray = np.array([], dtype=np.int64)
@@ -161,7 +164,9 @@ class RoadRouter:
     @classmethod
     def get_instance(cls, settings: Settings | None = None) -> RoadRouter:
         if cls._instance is None:
-            cls._instance = RoadRouter(settings=settings)
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = RoadRouter(settings=settings)
         return cls._instance
 
     def _load_or_build_graph(self) -> None:
@@ -169,6 +174,11 @@ class RoadRouter:
         start_time = time.time()
 
         cache_path = Path(self.settings.road_graph_cache_path)
+        if not cache_path.is_absolute() and not cache_path.exists():
+            root_candidate = Path(__file__).resolve().parents[2] / cache_path
+            if root_candidate.exists():
+                cache_path = root_candidate
+
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         pickle_sidecar = cache_path.with_suffix(".pkl")
 
@@ -192,10 +202,10 @@ class RoadRouter:
 
                 self.graph = ox.load_graphml(cache_path)
                 loaded = True
-                # Save pickle sidecar for instant startup next time
+                # Save pickle sidecar for instant startup next time with standard protocol 4
                 try:
                     with open(pickle_sidecar, "wb") as f:
-                        pickle.dump(self.graph, f, protocol=pickle.HIGHEST_PROTOCOL)
+                        pickle.dump(self.graph, f, protocol=4)
                     LOGGER.info("Saved fast pickle sidecar to %s", pickle_sidecar)
                 except Exception as pkl_exc:
                     LOGGER.debug("Could not write pickle sidecar: %s", pkl_exc)
@@ -247,21 +257,22 @@ class RoadRouter:
 
             try:
                 with open(pickle_sidecar, "wb") as f:
-                    pickle.dump(self.graph, f, protocol=pickle.HIGHEST_PROTOCOL)
+                    pickle.dump(self.graph, f, protocol=4)
             except Exception:
                 pass
 
         # Ensure base edge speeds and travel_time exist on all edges
         self._ensure_edge_attributes()
 
-        # Build undirected view for emergency routing fallback
-        self.undirected_graph = self.graph.to_undirected()
+        # Build undirected view for emergency routing fallback (zero-copy view)
+        self.undirected_graph = self.graph.to_undirected(as_view=True)
 
         # Build numpy lookup arrays for nearest node snapping and edge midpoints
         self._build_spatial_indices()
 
         current_mem, peak_mem = tracemalloc.get_traced_memory()
         tracemalloc.stop()
+        gc.collect()
         elapsed = time.time() - start_time
         LOGGER.info(
             "Road graph ready in %.2fs | Nodes: %d, Edges: %d | Startup Memory: %.2f MB (Peak: %.2f MB)",

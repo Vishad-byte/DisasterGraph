@@ -119,6 +119,23 @@ def fetch_open_meteo_aq_for_zones(
     try:
         with httpx.Client(timeout=timeout) as client:
             resp = client.get(OPEN_METEO_AQ_URL, params=params)
+            if resp.status_code == 429:
+                LOGGER.warning("Open-Meteo AQ rate limit (HTTP 429) hit. Falling back to baseline air quality observations.")
+                for zone in sample_zones:
+                    readings.append(
+                        AirQualityReading(
+                            zone_id=zone.zone_id,
+                            latitude=zone.centroid_lat,
+                            longitude=zone.centroid_lng,
+                            no2=30.0,
+                            pm2_5=45.0,
+                            aqi=55.0,
+                            severity=0.25,
+                            source="Open-Meteo-AQ-Fallback",
+                            time_iso=now_utc,
+                        )
+                    )
+                return readings
             resp.raise_for_status()
             data = resp.json()
             items = data if isinstance(data, list) else [data]
@@ -147,6 +164,11 @@ def fetch_open_meteo_aq_for_zones(
                         time_iso=now_utc,
                     )
                 )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 429:
+            LOGGER.warning("Open-Meteo AQ rate limit (HTTP 429) hit: %s", exc)
+        else:
+            LOGGER.warning("Open-Meteo AQ fetch failed: %s", exc)
     except Exception as exc:
         LOGGER.warning("Open-Meteo AQ fetch failed: %s", exc)
 

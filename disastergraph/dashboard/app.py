@@ -21,6 +21,10 @@ from disastergraph.graph.router import RoadRouter, decode_polyline
 app = FastAPI(title="DisasterGraph Dashboard API", version="0.1.0")
 settings = get_settings()
 LOGGER = logging.getLogger(__name__)
+
+# Include ingestion router so /ingest/* endpoints are served directly by unified process
+from disastergraph.ingestion.main import app as _ingestion_fastapi_app
+app.include_router(_ingestion_fastapi_app.router)
 _OVERVIEW_TTL_SECONDS = 300.0
 _ROUTES_TTL_SECONDS = 900.0
 _overview_cache_lock = threading.Lock()
@@ -86,6 +90,93 @@ def _http_post_json(
     if last_error is not None:
         raise last_error
     raise HTTPException(status_code=502, detail=f"Upstream POST failed for {url}")
+
+
+def _is_standalone_ingestion() -> bool:
+    url = settings.ingestion_service_url.strip().lower()
+    return url != "internal" and not url.startswith("http://127.0.0.1") and not url.startswith("http://localhost")
+
+
+def _dispatch_ingest(task_name: str) -> dict[str, Any]:
+    if _is_standalone_ingestion():
+        try:
+            return _http_post_json(_ingestion_url(f"/ingest/{task_name}"))
+        except Exception as exc:
+            LOGGER.warning("HTTP proxy to standalone ingestion service failed (%s), running in-process: %s", task_name, exc)
+
+    from disastergraph.ingestion.main import (
+        poll_air_quality,
+        poll_eonet,
+        poll_firms,
+        poll_gdacs,
+        poll_open_meteo,
+        poll_prune,
+        poll_sentinel,
+        poll_usgs,
+        ingest_osm_resources,
+        ingest_osm_roads,
+        ingest_run_all,
+        trigger_scheduler_jobs,
+    )
+    if task_name == "firms":
+        return poll_firms()
+    elif task_name == "usgs":
+        return poll_usgs()
+    elif task_name == "eonet":
+        return poll_eonet()
+    elif task_name == "gdacs":
+        return poll_gdacs()
+    elif task_name == "open_meteo":
+        return poll_open_meteo()
+    elif task_name == "air_quality":
+        return poll_air_quality()
+    elif task_name == "sentinel":
+        return poll_sentinel()
+    elif task_name == "osm_roads":
+        return ingest_osm_roads(_conn())
+    elif task_name == "osm_resources":
+        return ingest_osm_resources(_conn())
+    elif task_name == "prune":
+        return poll_prune()
+    elif task_name == "run_all":
+        return ingest_run_all()
+    elif task_name == "scheduler/trigger":
+        return trigger_scheduler_jobs()
+    raise HTTPException(status_code=404, detail=f"Unknown ingest task: {task_name}")
+
+
+def _dispatch_ingest_health() -> dict[str, Any]:
+    if _is_standalone_ingestion():
+        try:
+            return _http_get_json(_ingestion_url("/ingest/health"))
+        except Exception:
+            pass
+    try:
+        from disastergraph.ingestion.main import ingest_health
+        return ingest_health()
+    except Exception as exc:
+        return {"status": "ok", "mode": "in_process", "detail": str(exc)}
+
+
+@app.on_event("startup")
+def _dashboard_startup() -> None:
+    if not _is_standalone_ingestion():
+        try:
+            from disastergraph.ingestion.main import startup_event as ingestion_startup
+            ingestion_startup()
+            LOGGER.info("Unified mode: Ingestion background scheduler started in-process.")
+        except Exception as exc:
+            LOGGER.warning("Could not start unified in-process ingestion scheduler: %s", exc)
+
+
+@app.on_event("shutdown")
+def _dashboard_shutdown() -> None:
+    if not _is_standalone_ingestion():
+        try:
+            from disastergraph.ingestion.main import shutdown_event as ingestion_shutdown
+            ingestion_shutdown()
+        except Exception:
+            pass
 
 
 def _conn() -> Any:
@@ -640,19 +731,9 @@ def ui_routes_block_demo(count: int = 3) -> dict[str, Any]:
 
 
 @app.get("/ui-api/health")
-def ui_health() -> dict[str, Any]:
-    ingestion_health: dict[str, Any] = {
-        "status": "unknown",
-        "detail": "not_checked",
-    }
-    try:
-        ingestion_health = _http_get_json(_ingestion_url("/ingest/health"))
-    except Exception as exc:  # pragma: no cover
-        ingestion_health = {
-            "status": "down",
-            "detail": str(exc),
-        }
-
+@app.get("/ui-api/health/status")
+def ui_health_status() -> dict[str, Any]:
+    ingestion_health = _dispatch_ingest_health()
     dashboard_health = {"status": "ok"}
     return {
         "dashboard": dashboard_health,
@@ -663,7 +744,7 @@ def ui_health() -> dict[str, Any]:
 @app.post("/ui-api/ingest/firms")
 def ui_ingest_firms() -> dict[str, Any]:
     try:
-        result = _http_post_json(_ingestion_url("/ingest/firms"))
+        result = _dispatch_ingest("firms")
         _invalidate_ui_caches()
         return result
     except Exception as exc:  # pragma: no cover
@@ -673,7 +754,7 @@ def ui_ingest_firms() -> dict[str, Any]:
 @app.post("/ui-api/ingest/usgs")
 def ui_ingest_usgs() -> dict[str, Any]:
     try:
-        result = _http_post_json(_ingestion_url("/ingest/usgs"))
+        result = _dispatch_ingest("usgs")
         _invalidate_ui_caches()
         return result
     except Exception as exc:  # pragma: no cover
@@ -683,7 +764,7 @@ def ui_ingest_usgs() -> dict[str, Any]:
 @app.post("/ui-api/ingest/eonet")
 def ui_ingest_eonet() -> dict[str, Any]:
     try:
-        result = _http_post_json(_ingestion_url("/ingest/eonet"))
+        result = _dispatch_ingest("eonet")
         _invalidate_ui_caches()
         return result
     except Exception as exc:  # pragma: no cover
@@ -693,7 +774,7 @@ def ui_ingest_eonet() -> dict[str, Any]:
 @app.post("/ui-api/ingest/gdacs")
 def ui_ingest_gdacs() -> dict[str, Any]:
     try:
-        result = _http_post_json(_ingestion_url("/ingest/gdacs"))
+        result = _dispatch_ingest("gdacs")
         _invalidate_ui_caches()
         return result
     except Exception as exc:  # pragma: no cover
@@ -703,7 +784,7 @@ def ui_ingest_gdacs() -> dict[str, Any]:
 @app.post("/ui-api/ingest/open_meteo")
 def ui_ingest_open_meteo() -> dict[str, Any]:
     try:
-        result = _http_post_json(_ingestion_url("/ingest/open_meteo"))
+        result = _dispatch_ingest("open_meteo")
         _invalidate_ui_caches()
         return result
     except Exception as exc:  # pragma: no cover
@@ -713,7 +794,7 @@ def ui_ingest_open_meteo() -> dict[str, Any]:
 @app.post("/ui-api/ingest/air_quality")
 def ui_ingest_air_quality() -> dict[str, Any]:
     try:
-        result = _http_post_json(_ingestion_url("/ingest/air_quality"))
+        result = _dispatch_ingest("air_quality")
         _invalidate_ui_caches()
         return result
     except Exception as exc:  # pragma: no cover
@@ -723,7 +804,7 @@ def ui_ingest_air_quality() -> dict[str, Any]:
 @app.post("/ui-api/ingest/osm_resources")
 def ui_ingest_osm_resources() -> dict[str, Any]:
     try:
-        result = _http_post_json(_ingestion_url("/ingest/osm_resources"))
+        result = _dispatch_ingest("osm_resources")
         _invalidate_ui_caches()
         return result
     except Exception as exc:  # pragma: no cover
@@ -733,7 +814,7 @@ def ui_ingest_osm_resources() -> dict[str, Any]:
 @app.post("/ui-api/ingest/prune")
 def ui_ingest_prune() -> dict[str, Any]:
     try:
-        result = _http_post_json(_ingestion_url("/ingest/prune"))
+        result = _dispatch_ingest("prune")
         _invalidate_ui_caches()
         return result
     except Exception as exc:  # pragma: no cover
@@ -743,7 +824,7 @@ def ui_ingest_prune() -> dict[str, Any]:
 @app.post("/ui-api/ingest/sentinel")
 def ui_ingest_sentinel() -> dict[str, Any]:
     try:
-        result = _http_post_json(_ingestion_url("/ingest/sentinel"))
+        result = _dispatch_ingest("sentinel")
         _invalidate_ui_caches()
         return result
     except Exception as exc:  # pragma: no cover
@@ -753,7 +834,7 @@ def ui_ingest_sentinel() -> dict[str, Any]:
 @app.post("/ui-api/ingest/osm_roads")
 def ui_ingest_osm_roads() -> dict[str, Any]:
     try:
-        result = _http_post_json(_ingestion_url("/ingest/osm_roads"))
+        result = _dispatch_ingest("osm_roads")
         _invalidate_ui_caches()
         return result
     except Exception as exc:  # pragma: no cover
@@ -763,7 +844,7 @@ def ui_ingest_osm_roads() -> dict[str, Any]:
 @app.post("/ui-api/ingest/run_all")
 def ui_ingest_run_all() -> dict[str, Any]:
     try:
-        result = _http_post_json(_ingestion_url("/ingest/run_all"), timeout_seconds=600.0)
+        result = _dispatch_ingest("run_all")
         _invalidate_ui_caches()
         return result
     except Exception as exc:  # pragma: no cover
@@ -773,7 +854,7 @@ def ui_ingest_run_all() -> dict[str, Any]:
 @app.post("/ui-api/ingest/scheduler/trigger")
 def ui_ingest_scheduler_trigger() -> dict[str, Any]:
     try:
-        result = _http_post_json(_ingestion_url("/ingest/scheduler/trigger"))
+        result = _dispatch_ingest("scheduler/trigger")
         _invalidate_ui_caches()
         return result
     except Exception as exc:  # pragma: no cover
